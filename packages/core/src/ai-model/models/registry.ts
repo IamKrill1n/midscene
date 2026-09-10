@@ -15,6 +15,7 @@ import { glmAdapters } from './glm';
 import { gptAdapters } from './gpt';
 import { kimiAdapters } from './kimi';
 import { mimoAdapters } from './mimo';
+import { museAdapters } from './muse';
 import { qwenAdapters } from './qwen';
 import { uiTarsAdapters } from './ui-tars/adapter';
 
@@ -29,6 +30,7 @@ export const MODEL_ADAPTER_CONFIGS = {
   ...gptAdapters,
   ...kimiAdapters,
   ...mimoAdapters,
+  ...museAdapters,
 } satisfies Record<TModelFamily, ModelAdapterDefinition>;
 
 type ModelAdapterCacheKey = TModelFamily | 'default';

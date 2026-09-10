@@ -458,6 +458,55 @@ MIDSCENE_INSIGHT_MODEL_FAMILY="glm-v"
 - Github: [https://github.com/zai-org/GLM-V](https://github.com/zai-org/GLM-V)
 - Hugging Face: [https://huggingface.co/zai-org/GLM-4.6V](https://huggingface.co/zai-org/GLM-4.6V)
 
+### Muse Spark Series {#muse-spark}
+
+- Common model providers: [Meta Model API](https://dev.meta.ai/docs/), [OpenRouter](https://openrouter.ai/meta/muse-spark-1.3-contributor)
+
+<div className="model-series-table">
+
+| Model version | Commonly used model names | `MIDSCENE_MODEL_FAMILY` | Notes |
+| --- | --- | --- | --- |
+| Muse Spark 1.3 series | `muse-spark-1.3`, `muse-spark-1.3-contributor` | `muse-spark` | Reasoning model with vision. Contributor tier is cheaper and suitable for experiments. A single Default model covers planning, insight, and locate; no separate planning/insight split needed. |
+
+</div>
+
+Environment variable configuration example, using `meta/muse-spark-1.3-contributor` via OpenRouter:
+
+<ModelConfigTabs>
+  <ModelConfigTab type="default">
+
+```bash
+MIDSCENE_MODEL_BASE_URL="https://openrouter.ai/api/v1" # OpenRouter endpoint; use https://api.meta.ai/v1 for Meta Model API
+MIDSCENE_MODEL_API_KEY="......"
+MIDSCENE_MODEL_NAME="meta/muse-spark-1.3-contributor"
+MIDSCENE_MODEL_FAMILY="muse-spark"
+```
+
+  </ModelConfigTab>
+  <ModelConfigTab type="planning">
+
+```bash
+MIDSCENE_PLANNING_MODEL_BASE_URL="https://openrouter.ai/api/v1"
+MIDSCENE_PLANNING_MODEL_API_KEY="......"
+MIDSCENE_PLANNING_MODEL_NAME="meta/muse-spark-1.3-contributor"
+MIDSCENE_PLANNING_MODEL_FAMILY="muse-spark"
+```
+
+  </ModelConfigTab>
+  <ModelConfigTab type="insight">
+
+```bash
+MIDSCENE_INSIGHT_MODEL_BASE_URL="https://openrouter.ai/api/v1"
+MIDSCENE_INSIGHT_MODEL_API_KEY="......"
+MIDSCENE_INSIGHT_MODEL_NAME="meta/muse-spark-1.3-contributor"
+MIDSCENE_INSIGHT_MODEL_FAMILY="muse-spark"
+```
+
+  </ModelConfigTab>
+</ModelConfigTabs>
+
+Muse reasoning notes: Chat Completions uses top-level `reasoning_effort` (`minimal`/`low`/`medium`/`high`/`xhigh`). `none` is rejected by Muse. Midscene omits the param when reasoning is unset or `default`, maps `reasoningEnabled=true` to `medium`, and maps `reasoningEnabled=false` to `minimal`.
+
 ## Set environment variables
 
 Midscene reads model configuration from environment variables. Choose the method that matches how you use Midscene, or keep using your project's existing environment-management approach.
