@@ -41,6 +41,11 @@
       "import": "./dist/es/tree.mjs",
       "require": "./dist/lib/tree.js"
     },
+    "./tree-only": {
+      "types": "./dist/types/tree-only/index.d.ts",
+      "import": "./dist/es/tree-only/index.mjs",
+      "require": "./dist/lib/tree-only/index.js"
+    },
     "./device": {
       "types": "./dist/types/device/index.d.ts",
       "import": "./dist/es/device/index.mjs",
@@ -93,6 +98,7 @@
       "utils": ["./dist/types/utils.d.ts"],
       "ai-model": ["./dist/types/ai-model.d.ts"],
       "tree": ["./dist/types/tree.d.ts"],
+      "tree-only": ["./dist/types/tree-only/index.d.ts"],
       "device": ["./dist/types/device.d.ts"],
       "dump": ["./dist/types/dump/index.d.ts"],
       "dump/task-service-dump": ["./dist/types/dump/task-service-dump.d.ts"],

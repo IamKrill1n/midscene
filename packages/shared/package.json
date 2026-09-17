@@ -22,6 +22,11 @@
       "import": "./dist/es/extractor/index.mjs",
       "require": "./dist/lib/extractor/index.js"
     },
+    "./tree-only": {
+      "types": "./dist/types/tree-only/index.d.ts",
+      "import": "./dist/es/tree-only/index.mjs",
+      "require": "./dist/lib/tree-only/index.js"
+    },
     "./img": {
       "types": "./dist/types/img/index.d.ts",
       "import": "./dist/es/img/index.mjs",
