@@ -4,6 +4,7 @@ import type {
   HarmonyDeviceOpt,
   IOSDeviceOpt,
 } from './device';
+import type { TreeOnlyInputMode } from './tree-only/types';
 import type { AgentOpt, LocateResultElement, Rect } from './types';
 import type { UIContext } from './types';
 
@@ -133,6 +134,7 @@ export type MidsceneYamlScriptAgentOpt = Pick<
   | 'aiActionContext'
   | 'cache'
   | 'screenshotShrinkFactor'
+  | 'inputMode'
 >;
 
 export interface MidsceneYamlScriptConfig {
@@ -330,6 +332,12 @@ export interface MidsceneYamlFlowItemAIAction {
   instruction?: TUserPrompt;
   aiActionProgressTips?: string[];
   cacheable?: boolean;
+  /**
+   * Step-scoped input-mode override (T02). Precedence for T17 wiring:
+   * flow-step setting, script agent setting, existing agent setting,
+   * then implicit visual. Validated by `tree-only/mode.ts`.
+   */
+  inputMode?: TreeOnlyInputMode;
   [key: string]: unknown;
 }
 
@@ -337,11 +345,19 @@ export interface MidsceneYamlFlowItemAIAssert extends ServiceExtractOption {
   aiAssert: string;
   errorMessage?: string;
   name?: string;
+  /**
+   * Step-scoped input-mode override (T02); see `MidsceneYamlFlowItemAIAction`.
+   */
+  inputMode?: TreeOnlyInputMode;
 }
 
 export interface MidsceneYamlFlowItemAIWaitFor extends ServiceExtractOption {
   aiWaitFor: string;
   timeout?: number;
+  /**
+   * Step-scoped input-mode override (T02); see `MidsceneYamlFlowItemAIAction`.
+   */
+  inputMode?: TreeOnlyInputMode;
 }
 
 export interface MidsceneYamlFlowItemRunGherkinScenario {

@@ -143,7 +143,21 @@ export const userPromptInputSchema = z.union([
   structuredUserPromptInputSchema,
 ]);
 
+/**
+ * Operation-scoped input mode for test-runner/YAML forwarding (T02).
+ * `hybrid` is intentionally absent: it is rejected explicitly in the Jev
+ * tree-only path. Precedence and legacy compatibility live in
+ * `tree-only/mode.ts`; this schema only validates the forwarded value.
+ */
+export const inputModeInputSchema = z
+  .enum(['visual', 'tree-only'])
+  .optional()
+  .describe(
+    'Operation input mode. Omitted settings inherit the agent default; the implicit default is visual.',
+  );
+
 export const aiActOptionsInputSchema = z.strictObject({
+  inputMode: inputModeInputSchema,
   cacheable: z
     .boolean()
     .optional()
@@ -178,6 +192,7 @@ export const aiActInputSchema = z.strictObject({
 });
 
 export const insightOptionsInputSchema = z.strictObject({
+  inputMode: inputModeInputSchema,
   domIncluded: z
     .union([z.boolean(), z.literal('visible-only')])
     .optional()
@@ -208,6 +223,7 @@ export const aiAssertInputSchema = z.strictObject({
 });
 
 export const locateOptionsInputSchema = z.strictObject({
+  inputMode: inputModeInputSchema,
   context: z
     .string()
     .optional()

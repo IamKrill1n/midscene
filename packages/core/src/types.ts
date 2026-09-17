@@ -13,6 +13,7 @@ import type {
 import type { z } from 'zod';
 import type { TUserPrompt } from './common';
 import type { ScreenshotItem } from './screenshot-item';
+import type { TreeOnlyInputMode } from './tree-only/types';
 import type {
   DetailedLocateParam,
   MidsceneYamlFlowItem,
@@ -1016,6 +1017,15 @@ export interface AgentOpt {
   reportAttributes?: ReportAttributes;
   modelConfig?: TModelConfig;
   cache?: Cache;
+  /**
+   * Default input mode for live UI AI operations (T02).
+   *
+   * Omitted/inherited settings resolve to `visual`. Per-call `inputMode`
+   * overrides govern the whole operation without mutating this default;
+   * see `packages/core/src/tree-only/mode.ts` for precedence and legacy
+   * `domIncluded`/`screenshotIncluded` compatibility. `hybrid` is rejected.
+   */
+  inputMode?: TreeOnlyInputMode;
   /**
    * Maximum number of replanning cycles for aiAct.
    * Defaults are resolved by the active model adapter: 20 for standard planning,

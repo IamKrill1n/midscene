@@ -139,6 +139,7 @@
   },
   "dependencies": {
     "@midscene/shared": "workspace:*",
+    "@typesafe-ai/sdk": "0.6.0",
     "@ui-tars/action-parser": "1.2.3",
     "dayjs": "^1.11.11",
     "dotenv": "^16.4.5",
