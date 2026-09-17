@@ -1,14 +1,18 @@
 import type { FileChooser, Page as PlaywrightPageType } from 'playwright';
 import { Page as BasePage } from '../puppeteer/base-page';
 import type { WebPageOpt } from '../web-element';
+import { createPlaywrightTreeOnlyAdapter } from './tree-only';
 
 export class WebPage extends BasePage<'playwright', PlaywrightPageType> {
+  treeOnly: ReturnType<typeof createPlaywrightTreeOnlyAdapter>;
+
   private playwrightFileChooserHandler?: (
     chooser: FileChooser,
   ) => Promise<void>;
 
   constructor(page: PlaywrightPageType, opts?: WebPageOpt) {
     super(page, 'playwright', opts);
+    this.treeOnly = createPlaywrightTreeOnlyAdapter(this);
   }
 
   async registerFileChooserListener(
