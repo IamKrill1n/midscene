@@ -336,6 +336,7 @@ export function buildDetailedLocateParam(
 
   return {
     prompt,
+    ...(opt?.inputMode !== undefined ? { inputMode: opt.inputMode } : {}),
     ...(context ? { promptDisplay, context } : {}),
     deepLocate,
     cacheable,

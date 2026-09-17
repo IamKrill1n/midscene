@@ -1,6 +1,22 @@
+import {
+  createJevSystemOneCaller,
+  evaluateJev,
+  resolveJevModel,
+} from '@/ai-model/model-adapter/jev-transport';
 import { type ModelRuntime, getModelRuntime } from '@/ai-model/models';
 import { INTERNAL_CALL_ID_FIELD } from '@/ai-model/service-caller';
 import { IS_REPORT_BUILD } from '@/constants';
+import {
+  assertLegacyFlagsCompatible,
+  resolveEffectiveInputMode,
+} from '@/tree-only/mode';
+import type { TreeOnlyRunOptions } from '@/tree-only/runtime';
+import { treeOnlyTypingText } from '@/tree-only/text-helper';
+import {
+  JevEvaluationError,
+  type TreeOnlyInputMode,
+  TreeOnlyOperationError,
+} from '@/tree-only/types';
 import yaml from 'js-yaml';
 import type { TUserPrompt } from '../ai-model/index';
 import { ScreenshotItem } from '../screenshot-item';
@@ -126,6 +142,7 @@ const debug = getDebug('agent');
 const warn = getDebug('agent', { console: true });
 
 export type AiActOptions = {
+  inputMode?: TreeOnlyInputMode;
   cacheable?: boolean;
   fileChooserAccept?: string | string[];
   fileChooserAllowedDir?: string;
@@ -358,6 +375,131 @@ export class Agent<InterfaceType extends AbstractInterface = AbstractInterface>
     };
   }
 
+  private isTreeOnly(options?: {
+    inputMode?: unknown;
+    domIncluded?: unknown;
+    screenshotIncluded?: unknown;
+  }) {
+    const resolved = resolveEffectiveInputMode({
+      callInputMode: options?.inputMode,
+      agentInputMode: this.opts.inputMode,
+    });
+    assertLegacyFlagsCompatible(
+      resolved,
+      options as Parameters<typeof assertLegacyFlagsCompatible>[1],
+    );
+    if (resolved.effectiveMode !== 'tree-only') return false;
+    if (
+      !this.interface.treeOnly ||
+      this.interface.interfaceType !== 'playwright'
+    ) {
+      throw new TreeOnlyOperationError(
+        'Tree-only Jev supports the Playwright Chromium page agent only',
+        'unsupported-operation',
+      );
+    }
+    return true;
+  }
+
+  private assertVisualApi(api: string, options?: object) {
+    if (this.isTreeOnly(options as { inputMode?: unknown }))
+      throw new TreeOnlyOperationError(
+        `${api} is not supported in tree-only mode`,
+        'unsupported-operation',
+      );
+  }
+
+  private async runTreeOnlyOperation(
+    prompt: TUserPrompt,
+    options?: AiActOptions & Omit<LocateOption, 'deepThink'>,
+    direct?: TreeOnlyRunOptions['direct'],
+  ) {
+    const raw = typeof prompt === 'string' ? { prompt } : prompt;
+    if (!raw || typeof raw.prompt !== 'string' || !raw.prompt.trim())
+      throw new TreeOnlyOperationError(
+        'A nonempty text instruction is required',
+        'unsupported-input',
+      );
+    if (
+      raw.images?.length ||
+      options?.images?.length ||
+      options?.fileChooserAccept ||
+      options?.deepLocate ||
+      options?.deepThink ||
+      options?.xpath ||
+      options?.uiContext ||
+      (options?.effort && options.effort !== 'balance')
+    ) {
+      throw new TreeOnlyOperationError(
+        'Tree-only mode accepts text instructions without reference images, visual hints, uploads, or visual planning controls',
+        'unsupported-input',
+      );
+    }
+    const resolved = resolveEffectiveInputMode({
+      callInputMode: options?.inputMode,
+      agentInputMode: this.opts.inputMode,
+    });
+    const controller = new AbortController();
+    const timeout = setTimeout(
+      () => controller.abort('Tree-only operation deadline exceeded'),
+      120_000,
+    );
+    timeout.unref?.();
+    const abortSignal = options?.abortSignal
+      ? AbortSignal.any([options.abortSignal, controller.signal])
+      : controller.signal;
+    let caller:
+      | Awaited<ReturnType<typeof createJevSystemOneCaller>>
+      | undefined;
+    try {
+      return await this.taskExecutor.runTreeOnly({
+        context: {
+          operationId: `tree-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+          kind: direct
+            ? direct.type === 'Locate'
+              ? 'locate'
+              : 'direct-action'
+            : 'aiact',
+          instruction: raw.prompt,
+          ...resolved,
+          abortSignal,
+          deadlineMs: 120_000,
+        },
+        browser: this.interface.treeOnly!,
+        model: resolveJevModel().model,
+        maxSteps: direct ? 1 : (this.opts.replanningCycleLimit ?? 20),
+        direct,
+        evaluate: async (request) => {
+          try {
+            caller ??= await createJevSystemOneCaller();
+            return await evaluateJev(request, caller, {
+              signal: abortSignal,
+              timeoutMs: 30_000,
+            });
+          } catch (error) {
+            if (error instanceof JevEvaluationError)
+              throw new TreeOnlyOperationError(error.message, error.category);
+            throw error;
+          }
+        },
+        typeText: (input) => {
+          let runtime: ModelRuntime;
+          try {
+            runtime = this.resolveModelRuntime('default');
+          } catch {
+            throw new TreeOnlyOperationError(
+              'Tree-only typing requires a configured default text model',
+              'unsupported-input',
+            );
+          }
+          return treeOnlyTypingText(input, runtime, abortSignal);
+        },
+      });
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
   private createInsight(getUIContext?: () => UIContext): Insight {
     return new Insight(
       this.taskExecutor,
@@ -381,6 +523,7 @@ export class Agent<InterfaceType extends AbstractInterface = AbstractInterface>
       opts || {},
     );
     assertReportGenerationOptions(this.opts);
+    this.isTreeOnly();
 
     if (
       this.opts.aiContexts !== undefined &&
@@ -885,6 +1028,32 @@ export class Agent<InterfaceType extends AbstractInterface = AbstractInterface>
     opt?: T, // and all other action params
   ) {
     debug('callActionInActionSpace', type, ',', opt);
+    const treeParam = (opt || {}) as Record<string, any>;
+    const treeOptions = { ...treeParam, ...treeParam.locate };
+    if (this.isTreeOnly(treeOptions)) {
+      if (!['Tap', 'Input', 'Scroll'].includes(type))
+        throw new TreeOnlyOperationError(
+          `${type} is not supported in tree-only mode`,
+          'unsupported-operation',
+        );
+      if (
+        type === 'Scroll' &&
+        (treeParam.locate ||
+          !['up', 'down', undefined].includes(treeParam.direction) ||
+          !['singleAction', undefined].includes(treeParam.scrollType))
+      )
+        throw new TreeOnlyOperationError(
+          'Tree-only scrolling supports page-level single up/down actions only',
+          'unsupported-operation',
+        );
+      const instruction =
+        treeParam.locate?.prompt ??
+        (type === 'Scroll' ? 'Scroll the page' : undefined);
+      return await this.runTreeOnlyOperation(instruction, treeOptions, {
+        type: type as 'Tap' | 'Input' | 'Scroll',
+        param: treeParam,
+      });
+    }
 
     const actionPlan: PlanningAction<T> = {
       type: type as any,
@@ -920,6 +1089,11 @@ export class Agent<InterfaceType extends AbstractInterface = AbstractInterface>
     opt?: LocateOption & { fileChooserAccept?: string | string[] },
   ): Promise<void> {
     assert(locatePrompt, 'missing locate prompt for tap');
+    if (this.isTreeOnly(opt) && opt?.fileChooserAccept)
+      throw new TreeOnlyOperationError(
+        'Uploads are not supported in tree-only mode',
+        'unsupported-operation',
+      );
 
     const detailedLocateParam = buildDetailedLocateParam(
       locatePrompt,
@@ -1259,6 +1433,14 @@ export class Agent<InterfaceType extends AbstractInterface = AbstractInterface>
     taskPrompt: TUserPrompt,
     opt?: AiActOptions,
   ): Promise<string | undefined> {
+    if (this.isTreeOnly(opt)) {
+      const instruction = buildPromptWithContext(
+        taskPrompt,
+        this.resolveUserContext('aiAct', opt?.context),
+      );
+      await this.runTreeOnlyOperation(instruction, opt);
+      return undefined;
+    }
     const internalOptions = opt as AiActInternalOptions | undefined;
     const internalReportDisplay = internalOptions?._internalReportDisplay;
     const taskPromptText =
@@ -1482,22 +1664,27 @@ export class Agent<InterfaceType extends AbstractInterface = AbstractInterface>
     demand: ServiceExtractParam,
     opt?: QueryOptions,
   ): Promise<ReturnType> {
+    this.assertVisualApi('AI query/assertion', opt);
     return this.createInsight().aiQuery<ReturnType>(demand, opt);
   }
 
   async aiBoolean(prompt: TUserPrompt, opt?: QueryOptions): Promise<boolean> {
+    this.assertVisualApi('AI query/assertion', opt);
     return this.createInsight().aiBoolean(prompt, opt);
   }
 
   async aiNumber(prompt: TUserPrompt, opt?: QueryOptions): Promise<number> {
+    this.assertVisualApi('AI query/assertion', opt);
     return this.createInsight().aiNumber(prompt, opt);
   }
 
   async aiString(prompt: TUserPrompt, opt?: QueryOptions): Promise<string> {
+    this.assertVisualApi('AI query/assertion', opt);
     return this.createInsight().aiString(prompt, opt);
   }
 
   async aiAsk(prompt: TUserPrompt, opt?: QueryOptions): Promise<string> {
+    this.assertVisualApi('AI query/assertion', opt);
     return this.createInsight().aiAsk(prompt, opt);
   }
 
@@ -1507,6 +1694,23 @@ export class Agent<InterfaceType extends AbstractInterface = AbstractInterface>
    * Do not rely on rect for strict element boundaries. Prefer center for the target.
    */
   async aiLocate(prompt: TUserPrompt, opt?: LocateOption) {
+    if (this.isTreeOnly(opt)) {
+      const located = await this.runTreeOnlyOperation(
+        buildPromptWithContext(
+          prompt,
+          this.resolveUserContext('aiLocate', opt?.context),
+        ),
+        opt,
+        { type: 'Locate', param: {} },
+      );
+      if (!located?.rect)
+        throw new TreeOnlyOperationError(
+          'Tree target has no bounds',
+          'malformed',
+        );
+      return { center: located.center, rect: located.rect, dpr: located.dpr };
+    }
+
     const locateParam = buildDetailedLocateParam(
       prompt,
       this.withContext('aiLocate', opt),
@@ -1548,10 +1752,12 @@ export class Agent<InterfaceType extends AbstractInterface = AbstractInterface>
     msg?: string,
     opt?: AssertOptions,
   ): Promise<AgentAssertResult | undefined> {
+    this.assertVisualApi('AI query/assertion', opt);
     return this.createInsight().aiAssert(assertion, msg, opt);
   }
 
   async aiWaitFor(assertion: TUserPrompt, opt?: AgentWaitForOpt) {
+    this.assertVisualApi('aiWaitFor', opt);
     const modelRuntime = this.resolveModelRuntime('insight');
     const options = this.withContext('aiWaitFor', opt);
     await this.taskExecutor.waitFor(

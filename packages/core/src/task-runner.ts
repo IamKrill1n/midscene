@@ -123,7 +123,7 @@ export class TaskRunner {
 
   onTaskStart?: ExecutionTaskProgressOptions['onTaskStart'];
 
-  private readonly uiContextBuilder: () => Promise<UIContext>;
+  private readonly uiContextBuilder: () => Promise<UIContext | undefined>;
 
   private readonly onSnapshotChange?:
     | ((runner: TaskRunner, error?: TaskExecutionError) => Promise<void> | void)
@@ -137,7 +137,7 @@ export class TaskRunner {
 
   constructor(
     name: string,
-    uiContextBuilder: () => Promise<UIContext>,
+    uiContextBuilder: () => Promise<UIContext | undefined>,
     options?: TaskRunnerInitOptions,
   ) {
     this.id = uuid();

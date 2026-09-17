@@ -9,6 +9,7 @@ import type { AgentOpt, LocateResultElement, Rect } from './types';
 import type { UIContext } from './types';
 
 export interface LocateOption extends Partial<TMultimodalPrompt> {
+  inputMode?: TreeOnlyInputMode;
   prompt?: TUserPrompt;
   /**
    * Additional facts, rules, or constraints for this AI call. It overrides

@@ -18,6 +18,7 @@ import type {
   TaskRunnerEvent,
 } from '@/task-runner';
 import { TaskExecutionError } from '@/task-runner';
+import { type TreeOnlyRunOptions, runTreeOnly } from '@/tree-only/runtime';
 import type {
   AiActEffort,
   AiActProgressData,
@@ -163,6 +164,7 @@ export class TaskExecutor {
     title: string,
     options?: {
       tasks?: ExecutionTaskApply[];
+      treeOnly?: boolean;
       uiContext?: UIContext;
       referenceImages?: readonly ExecutionReferenceImage[];
       onSnapshotChange?: (
@@ -175,9 +177,11 @@ export class TaskExecutor {
     return new ExecutionSession(
       title,
       () =>
-        options?.uiContext
-          ? Promise.resolve(options.uiContext)
-          : Promise.resolve(this.service.contextRetrieverFn()),
+        options?.treeOnly
+          ? Promise.resolve(undefined)
+          : options?.uiContext
+            ? Promise.resolve(options.uiContext)
+            : Promise.resolve(this.service.contextRetrieverFn()),
       {
         onTaskStart: this.onTaskStartCallback,
         tasks: options?.tasks,
@@ -343,6 +347,53 @@ export class TaskExecutor {
     return {
       runner,
     };
+  }
+
+  async runTreeOnly(options: Omit<TreeOnlyRunOptions, 'execute' | 'record'>) {
+    const session = this.createExecutionSession(options.context.instruction, {
+      treeOnly: true,
+    });
+    return runTreeOnly({
+      ...options,
+      evaluate: async (request) => {
+        const startedAt = Date.now();
+        const response = await options.evaluate(request);
+        await session.appendAndRun({
+          type: 'Planning',
+          subType: 'Plan',
+          param: { userInstruction: options.context.instruction },
+          executor: async ({ task }) => {
+            task.usage = {
+              prompt_tokens: response.usage?.promptTokens,
+              completion_tokens: response.usage?.completionTokens,
+              total_tokens: response.usage?.totalTokens,
+              cached_input: undefined,
+              time_cost: Date.now() - startedAt,
+              model_name: request.model,
+              model_description: 'TypeSafe Jev',
+              response_model_name: response.model,
+              intent: 'planning',
+              slot: 'planning',
+              request_id: undefined,
+            };
+            return {
+              output: response,
+              log: {
+                model: response.model,
+                usage: response.usage,
+                answers: response.answers,
+              },
+            };
+          },
+        });
+        return response;
+      },
+      execute: async (plan, beforeDispatch) => {
+        await session.appendAndRun(
+          this.taskBuilder.buildResolvedAction(plan, beforeDispatch),
+        );
+      },
+    });
   }
 
   async runPlans(

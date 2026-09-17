@@ -28,7 +28,7 @@ export class ExecutionSession {
 
   constructor(
     name: string,
-    contextProvider: () => Promise<UIContext>,
+    contextProvider: () => Promise<UIContext | undefined>,
     options?: ExecutionSessionOptions,
   ) {
     this.runner = new TaskRunner(name, contextProvider, options);

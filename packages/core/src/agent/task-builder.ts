@@ -247,6 +247,20 @@ export class TaskBuilder {
       }
     });
 
+    context.tasks.push(this.buildResolvedAction(plan));
+  }
+
+  public buildResolvedAction(
+    plan: PlanningAction,
+    treeOnlyBeforeDispatch?: (param: Record<string, any>) => Promise<void>,
+  ): ExecutionTaskApply {
+    const planType = plan.type;
+    const action = findActionInActionSpaceOrThrow(planType, this.actionSpace);
+    const param = plan.param;
+    const requiredLocateFields = findAllMidsceneLocatorField(
+      action.paramSchema,
+      true,
+    );
     const task: ExecutionTaskApply<
       'Action Space',
       any,
@@ -268,7 +282,10 @@ export class TaskBuilder {
         );
 
         const uiContext = taskContext.uiContext;
-        assert(uiContext, 'uiContext is required for Action task');
+        assert(
+          uiContext || treeOnlyBeforeDispatch,
+          'uiContext is required for Action task',
+        );
 
         requiredLocateFields.forEach((field) => {
           assert(
@@ -306,7 +323,9 @@ export class TaskBuilder {
         }
         setTimingFieldOnce(timing, 'beforeInvokeActionHookEnd');
 
-        const { shrunkShotToLogicalRatio } = uiContext;
+        const shrunkShotToLogicalRatio = treeOnlyBeforeDispatch
+          ? 1
+          : uiContext?.shrunkShotToLogicalRatio;
         if (shrunkShotToLogicalRatio === undefined) {
           throw new Error(
             'shrunkShotToLogicalRatio is not defined in Action task',
@@ -333,6 +352,7 @@ export class TaskBuilder {
         setTimingFieldOnce(timing, 'callActionStart');
 
         debug('calling action', action.name);
+        await treeOnlyBeforeDispatch?.(parsedParam);
         const actionFn = action.call.bind(this.interface);
         const actionResult = await actionFn(parsedParam, taskContext);
         setTimingFieldOnce(timing, 'callActionEnd');
@@ -373,7 +393,7 @@ export class TaskBuilder {
       },
     };
 
-    context.tasks.push(task);
+    return task;
   }
 
   private createLocateTask(

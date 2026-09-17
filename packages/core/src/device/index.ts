@@ -10,6 +10,7 @@ import type { ElementNode } from '@midscene/shared/extractor';
 import { getDebug } from '@midscene/shared/logger';
 import { _keyDefinitions } from '@midscene/shared/us-keyboard-layout';
 import { z } from 'zod';
+import type { TreeOnlyBrowserAdapter } from '../tree-only/runtime';
 import type {
   ElementCacheFeature,
   Rect,
@@ -173,6 +174,9 @@ export interface ComputerInputPrimitives extends InputPrimitives {
 
 export abstract class AbstractInterface {
   abstract interfaceType: string;
+
+  /** Optional image-free browser capture and target validation. */
+  treeOnly?: TreeOnlyBrowserAdapter;
 
   abstract screenshotBase64(): Promise<string>;
   abstract size(): Promise<Size>;
