@@ -43,4 +43,18 @@ export {
   getElementXpath,
 } from './locator';
 
+export {
+  TREE_ONLY_BROWSER_COLLECTOR,
+  TREE_ONLY_BROWSER_DEFAULT_MAX_NODES,
+  TREE_ONLY_BROWSER_SNAPSHOT_SCHEMA_VERSION,
+  collectTreeOnlyBrowserSnapshot,
+  serializeTreeOnlyBrowserSnapshot,
+} from './tree-only-collector';
+export type {
+  TreeOnlyBackendRef,
+  TreeOnlyBrowserCollectOptions,
+  TreeOnlyBrowserCollectResult,
+  TreeOnlyBrowserCollectViewport,
+} from './tree-only-collector';
+
 export { isNotContainerElement } from './dom-util';
