@@ -10,6 +10,7 @@ import {
   assertLegacyFlagsCompatible,
   resolveEffectiveInputMode,
 } from '@/tree-only/mode';
+import { createTreeOnlyPlanner } from '@/tree-only/planner';
 import type { TreeOnlyRunOptions } from '@/tree-only/runtime';
 import { treeOnlyTypingText } from '@/tree-only/text-helper';
 import {
@@ -413,6 +414,7 @@ export class Agent<InterfaceType extends AbstractInterface = AbstractInterface>
     prompt: TUserPrompt,
     options?: AiActOptions & Omit<LocateOption, 'deepThink'>,
     direct?: TreeOnlyRunOptions['direct'],
+    actionContext?: string,
   ) {
     const raw = typeof prompt === 'string' ? { prompt } : prompt;
     if (!raw || typeof raw.prompt !== 'string' || !raw.prompt.trim())
@@ -452,6 +454,15 @@ export class Agent<InterfaceType extends AbstractInterface = AbstractInterface>
       | Awaited<ReturnType<typeof createJevSystemOneCaller>>
       | undefined;
     try {
+      // Planned operations (aiAct) use the tree/text planner and ask Jev only
+      // for observed targets. Direct primitives keep their fixed action.
+      const plan = direct
+        ? undefined
+        : createTreeOnlyPlanner({
+            runtime: this.resolveModelRuntime('planning'),
+            actionSpace: this.fullActionSpace,
+            abortSignal,
+          });
       return await this.taskExecutor.runTreeOnly({
         context: {
           operationId: `tree-${Date.now()}-${Math.random().toString(36).slice(2)}`,
@@ -461,6 +472,7 @@ export class Agent<InterfaceType extends AbstractInterface = AbstractInterface>
               : 'direct-action'
             : 'aiact',
           instruction: raw.prompt,
+          ...(actionContext !== undefined ? { actionContext } : {}),
           ...resolved,
           abortSignal,
           deadlineMs: 120_000,
@@ -469,6 +481,7 @@ export class Agent<InterfaceType extends AbstractInterface = AbstractInterface>
         model: resolveJevModel().model,
         maxSteps: direct ? 1 : (this.opts.replanningCycleLimit ?? 20),
         direct,
+        plan,
         evaluate: async (request) => {
           try {
             caller ??= await createJevSystemOneCaller();
@@ -1434,11 +1447,15 @@ export class Agent<InterfaceType extends AbstractInterface = AbstractInterface>
     opt?: AiActOptions,
   ): Promise<string | undefined> {
     if (this.isTreeOnly(opt)) {
-      const instruction = buildPromptWithContext(
+      // Public context precedence is resolved once here (call > api > default)
+      // and passed separately so the planner and Jev receive the same context.
+      const actionContext = this.resolveUserContext('aiAct', opt?.context);
+      await this.runTreeOnlyOperation(
         taskPrompt,
-        this.resolveUserContext('aiAct', opt?.context),
+        opt,
+        undefined,
+        actionContext,
       );
-      await this.runTreeOnlyOperation(instruction, opt);
       return undefined;
     }
     const internalOptions = opt as AiActInternalOptions | undefined;

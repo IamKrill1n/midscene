@@ -1,3 +1,4 @@
+import type { TreeOnlyPlannerDecision } from '@/tree-only/planner';
 import {
   type TreeOnlyCapture,
   type TreeOnlyRunOptions,
@@ -105,7 +106,7 @@ describe('tree-only Jev actions', () => {
   it('types, clicks and completes; ignores unused targets and supplies recent actions', async () => {
     const { options, captured } = setup();
     const requests: JevEvaluationRequest[] = [];
-    options.evaluate = rs.fn(async (request) => {
+    options.evaluate = rs.fn(async (request: JevEvaluationRequest) => {
       requests.push(request);
       return answer(
         request,
@@ -215,5 +216,166 @@ describe('tree-only Jev actions', () => {
     };
     await expect(runTreeOnly(options)).rejects.toThrow('bad helper JSON');
     expect(options.execute).not.toHaveBeenCalled();
+  });
+});
+
+describe('tree-only planned operations', () => {
+  function plannedSetup(decisions: TreeOnlyPlannerDecision[]) {
+    const { options, captured } = setup();
+    options.plan = rs.fn(async () => decisions.shift()!);
+    return { options, captured };
+  }
+
+  it('routes each planned interaction to Jev for target selection only', async () => {
+    const { options } = plannedSetup([
+      { operation: 'TYPE_TEXT', instruction: 'the Name field', value: 'Alice' },
+      { operation: 'CLICK', instruction: 'the Submit button' },
+      { operation: 'DONE' },
+    ]);
+    const requests: JevEvaluationRequest[] = [];
+    options.evaluate = rs.fn(async (request: JevEvaluationRequest) => {
+      requests.push(request);
+      return {
+        model: 'test-jev',
+        answers: request.questions.map((question) => ({
+          questionId: question.id,
+          kind: 'choice' as const,
+          optionId:
+            question.id === 'target_TYPE_TEXT'
+              ? 'r2'
+              : question.id === 'target_CLICK'
+                ? 'r1'
+                : 'no-match',
+        })),
+      };
+    });
+    await runTreeOnly(options);
+
+    // The planner chooses the operation; Jev sees only the target question.
+    expect(
+      requests.map((request) => request.questions.map((q) => q.id)),
+    ).toEqual([['target_TYPE_TEXT'], ['target_CLICK']]);
+    expect(JSON.parse(requests[0].state).goal).toBe('the Name field');
+    const calls = rs.mocked(options.execute).mock.calls;
+    expect(calls.map(([plan]) => plan.type)).toEqual(['Input', 'Tap']);
+    expect(calls[0][0].param.value).toBe('Alice');
+    expect(calls[0][0].param.locate.center).toEqual([60, 25]);
+    expect(calls[1][0].param.locate.center).toEqual([60, 25]);
+    expect(options.typeText).not.toHaveBeenCalled();
+  });
+
+  it('passes instruction, public context, and recovery context to the planner', async () => {
+    const { options } = plannedSetup([{ operation: 'DONE' }]);
+    options.context.actionContext = 'public context';
+    options.context.recoveryContext = 'fresh evidence';
+    await runTreeOnly(options);
+    expect(options.plan).toHaveBeenCalledWith(
+      expect.objectContaining({
+        instruction: 'Submit the form',
+        actionContext: 'public context',
+        recoveryContext: 'fresh evidence',
+        state: expect.objectContaining({
+          page: expect.objectContaining({ title: 'Form' }),
+          elements: expect.any(Array),
+          recent_actions: [],
+        }),
+      }),
+    );
+    expect(options.evaluate).not.toHaveBeenCalled();
+  });
+
+  it('includes interaction, public, and recovery context in the Jev goal', async () => {
+    const { options } = plannedSetup([
+      { operation: 'CLICK', instruction: 'the Submit button' },
+      { operation: 'DONE' },
+    ]);
+    options.context.actionContext = 'admin UI';
+    options.context.recoveryContext = 'the previous click missed';
+    const requests: JevEvaluationRequest[] = [];
+    options.evaluate = rs.fn(async (request: JevEvaluationRequest) => {
+      requests.push(request);
+      return answer(request, 'CLICK', 'r1');
+    });
+    await runTreeOnly(options);
+    expect(JSON.parse(requests[0].state).goal).toBe(
+      'the Submit button\nContext: admin UI\nRecovery: the previous click missed',
+    );
+    expect(options.execute).toHaveBeenCalledTimes(1);
+  });
+
+  it('uses the typing helper only when the planner omits an input value', async () => {
+    const { options } = plannedSetup([
+      { operation: 'TYPE_TEXT', instruction: 'the Name field' },
+      { operation: 'DONE' },
+    ]);
+    options.evaluate = async (request) => answer(request, 'TYPE_TEXT', 'r2');
+    await runTreeOnly(options);
+    expect(options.typeText).toHaveBeenCalledTimes(1);
+    expect(options.typeText).toHaveBeenCalledWith(
+      expect.objectContaining({
+        goal: 'the Name field',
+        field: expect.objectContaining({ ref: 'r2' }),
+      }),
+    );
+    const calls = rs.mocked(options.execute).mock.calls;
+    expect(calls[0][0].param.value).toBe('Alice');
+  });
+
+  it('executes planned scrolls without a model call and preserves parameters', async () => {
+    const { options } = plannedSetup([
+      { operation: 'SCROLL_UP', distance: 120 },
+      { operation: 'DONE' },
+    ]);
+    await runTreeOnly(options);
+    expect(options.evaluate).not.toHaveBeenCalled();
+    const calls = rs.mocked(options.execute).mock.calls;
+    expect(calls[0][0]).toMatchObject({
+      type: 'Scroll',
+      param: { direction: 'up', scrollType: 'singleAction', distance: 120 },
+    });
+  });
+
+  it('recovers planner failures through the shared budget', async () => {
+    const { options, captured } = setup();
+    let attempts = 0;
+    options.plan = rs.fn(async () => {
+      attempts += 1;
+      if (attempts === 1) throw new Error('planner service unavailable');
+      return { operation: 'DONE' as const };
+    });
+    await runTreeOnly(options);
+    expect(attempts).toBe(2);
+    expect(options.browser.capture).toHaveBeenCalledTimes(2);
+    expect(captured.release).toHaveBeenCalled();
+  });
+
+  it('fails a blocked plan permanently without asking Jev', async () => {
+    const { options } = plannedSetup([
+      { operation: 'BLOCKED', message: 'no supported path' },
+    ]);
+    await expect(runTreeOnly(options)).rejects.toThrow('no supported path');
+    expect(options.evaluate).not.toHaveBeenCalled();
+    expect(options.execute).not.toHaveBeenCalled();
+    expect(options.browser.capture).toHaveBeenCalledTimes(1);
+  });
+
+  it('rejects combining a planner with a direct action', async () => {
+    const { options } = setup();
+    options.plan = async () => ({ operation: 'DONE' });
+    options.direct = { type: 'Tap', param: {} };
+    await expect(runTreeOnly(options)).rejects.toThrow('not both');
+    expect(options.browser.capture).not.toHaveBeenCalled();
+  });
+
+  it('does not plan from failed or truncated captures', async () => {
+    const { options, captured } = plannedSetup([{ operation: 'DONE' }]);
+    captured.snapshot.base.delivery.truncated = true;
+    await expect(runTreeOnly(options)).rejects.toThrow('capture budget');
+    expect(options.plan).not.toHaveBeenCalled();
+
+    captured.snapshot.base.delivery.truncated = false;
+    captured.snapshot.base.status = 'failed';
+    await expect(runTreeOnly(options)).rejects.toThrow('capture failed');
+    expect(options.plan).not.toHaveBeenCalled();
   });
 });

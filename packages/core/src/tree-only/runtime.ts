@@ -16,6 +16,12 @@ import {
   throwIfTreeOnlyDeadlineExceeded,
 } from './lifecycle';
 import {
+  type TreeOnlyPlanFn,
+  type TreeOnlyPlannerDecision,
+  type TreeOnlyPlannerPlan,
+  treeOnlyPlannerDirect,
+} from './planner';
+import {
   type JevChoiceQuestion,
   type JevEvaluationRequest,
   type JevEvaluationResponse,
@@ -26,6 +32,7 @@ import {
 export type TreeOnlyAction =
   | 'CLICK'
   | 'TYPE_TEXT'
+  | 'LOCATE'
   | 'SCROLL_UP'
   | 'SCROLL_DOWN'
   | 'WAIT'
@@ -66,6 +73,17 @@ export interface TreeOnlyHelperInput {
   page: TreeOnlyCapture['page'];
   recent_actions: TreeOnlyHistoryEntry[];
 }
+/** Shared text evidence for the planner and for Jev. Never contains images. */
+export interface TreeOnlyEvidence {
+  page: TreeOnlyCapture['page'];
+  elements: Array<
+    TreeOnlyBrowserNode & {
+      supported_operations: ReturnType<typeof treeOnlySupportedActions>;
+    }
+  >;
+  coverage: TreeOnlyBrowserSnapshot['base']['coverageGaps'];
+  recent_actions: TreeOnlyHistoryEntry[];
+}
 export interface TreeOnlyRunOptions {
   context: TreeOnlyOperationContext;
   browser: TreeOnlyBrowserAdapter;
@@ -78,6 +96,12 @@ export interface TreeOnlyRunOptions {
   ): Promise<void>;
   record?(response: JevEvaluationResponse, request: JevEvaluationRequest): void;
   maxSteps: number;
+  /**
+   * Tree/text planner for planned operations such as aiAct. When supplied,
+   * the planner chooses each interaction and Jev is asked only for the
+   * observed target. Mutually exclusive with `direct`.
+   */
+  plan?: TreeOnlyPlanFn;
   direct?: {
     type: 'Locate' | 'Tap' | 'Input' | 'Scroll';
     param: Record<string, any>;
@@ -129,6 +153,22 @@ export function treeOnlySupportedActions(
   )
     return ['CLICK', 'TYPE_TEXT'];
   return TREE_ONLY_CLICK_ROLES.has(node.role) ? ['CLICK'] : [];
+}
+
+/** Build the image-free evidence shared by the planner and Jev. */
+export function buildTreeOnlyEvidence(
+  capture: TreeOnlyCapture,
+  history: TreeOnlyHistoryEntry[],
+): TreeOnlyEvidence {
+  return {
+    page: capture.page,
+    elements: capture.snapshot.nodes.map((node) => ({
+      ...node,
+      supported_operations: treeOnlySupportedActions(node),
+    })),
+    coverage: capture.snapshot.base.coverageGaps,
+    recent_actions: history.slice(-10),
+  };
 }
 
 export function buildTreeOnlyRequest(
@@ -207,13 +247,7 @@ export function buildTreeOnlyRequest(
     model,
     state: JSON.stringify({
       goal,
-      page: capture.page,
-      elements: nodes.map((node) => ({
-        ...node,
-        supported_operations: treeOnlySupportedActions(node),
-      })),
-      coverage: snapshot.base.coverageGaps,
-      recent_actions: history.slice(-10),
+      ...buildTreeOnlyEvidence(capture, history),
     }),
     questions,
   };
@@ -241,11 +275,58 @@ function selected(
   return answer.optionId;
 }
 
+function operationFromDirect(
+  direct: NonNullable<TreeOnlyRunOptions['direct']>,
+): TreeOnlyAction {
+  switch (direct.type) {
+    case 'Locate':
+      return 'LOCATE';
+    case 'Tap':
+      return 'CLICK';
+    case 'Input':
+      return 'TYPE_TEXT';
+    case 'Scroll':
+      return direct.param.direction === 'up' ? 'SCROLL_UP' : 'SCROLL_DOWN';
+  }
+}
+
+/** The Jev goal for one planned interaction: instruction plus public context. */
+function plannedGoal(
+  planned: TreeOnlyPlannerPlan,
+  actionContext: string | undefined,
+  recoveryContext: string | undefined,
+  fallback: string,
+): string {
+  const instruction =
+    'instruction' in planned && planned.instruction
+      ? planned.instruction
+      : fallback;
+  const parts = [instruction];
+  const context = actionContext?.trim();
+  if (context) parts.push(`Context: ${context}`);
+  const recovery = recoveryContext?.trim();
+  if (recovery) parts.push(`Recovery: ${recovery}`);
+  return parts.join('\n');
+}
+
+interface TreeOnlyStepDecision {
+  operation: TreeOnlyAction;
+  target?: string;
+  node?: TreeOnlyBrowserNode;
+  value?: string;
+  located?: LocateResultElement;
+  directParam?: Record<string, any>;
+}
+
 export async function runTreeOnly(
   options: TreeOnlyRunOptions,
 ): Promise<LocateResultElement | undefined> {
   if (!Number.isInteger(options.maxSteps) || options.maxSteps < 1)
     throw new Error('Tree-only maxSteps must be a positive integer');
+  if (options.plan && options.direct)
+    throw new Error(
+      'runTreeOnly accepts a planner or a direct action, not both',
+    );
   const state = createTreeOnlyOperationState(options.context);
   const history: TreeOnlyHistoryEntry[] = [];
   let capture: TreeOnlyCapture | undefined;
@@ -253,18 +334,64 @@ export async function runTreeOnly(
   let repeatedDecisions = 0;
   try {
     for (let step = 0; step < options.maxSteps; step++) {
-      const { value: decision } = await runTreeOnlyWithRecovery(
-        state,
-        async () => {
+      const { value: decision } =
+        await runTreeOnlyWithRecovery<TreeOnlyStepDecision>(state, async () => {
           await capture?.release();
           capture = await options.browser.capture();
           attachTreeOnlySnapshot(state, capture.snapshot.base.snapshotId);
+
+          let planned: TreeOnlyPlannerDecision | undefined;
+          if (options.plan) {
+            // Never plan from failed or budget-truncated evidence: a planner
+            // completion decision there would claim success on partial input.
+            if (capture.snapshot.base.status === 'failed')
+              throw new TreeOnlyOperationError(
+                'Browser tree capture failed',
+                'service-failure',
+              );
+            if (capture.snapshot.base.delivery.truncated)
+              throw new TreeOnlyOperationError(
+                'Tree context exceeds the capture budget; narrow the page before retrying',
+                'unsupported-input',
+              );
+            planned = await options.plan({
+              instruction: options.context.instruction,
+              actionContext: options.context.actionContext,
+              recoveryContext: options.context.recoveryContext,
+              state: buildTreeOnlyEvidence(capture, history),
+            });
+            throwIfTreeOnlyCancelled(state.context);
+            throwIfTreeOnlyDeadlineExceeded(state);
+            if (planned.operation === 'BLOCKED')
+              throw new TreeOnlyOperationError(
+                planned.message
+                  ? `Tree-only planner cannot complete this goal: ${planned.message}`
+                  : 'Tree-only planner cannot complete this goal with supported actions',
+                'unsupported-operation',
+              );
+          }
+          if (planned?.operation === 'DONE') return { operation: 'DONE' };
+          const plannedAction =
+            planned && planned.operation !== 'BLOCKED' ? planned : undefined;
+          const resolvedDirect = options.direct
+            ? options.direct
+            : plannedAction
+              ? treeOnlyPlannerDirect(plannedAction)
+              : undefined;
+          const goal = plannedAction
+            ? plannedGoal(
+                plannedAction,
+                options.context.actionContext,
+                options.context.recoveryContext,
+                options.context.instruction,
+              )
+            : options.context.instruction;
           const request = buildTreeOnlyRequest(
             capture,
-            options.context.instruction,
+            goal,
             history,
             options.model,
-            options.direct,
+            resolvedDirect,
           );
           const response = request.questions.length
             ? await options.evaluate(request)
@@ -272,19 +399,9 @@ export async function runTreeOnly(
           options.record?.(response, request);
           throwIfTreeOnlyCancelled(state.context);
           throwIfTreeOnlyDeadlineExceeded(state);
-          const operation = options.direct
-            ? options.direct.type === 'Scroll' &&
-              options.direct.param.direction === 'up'
-              ? 'SCROLL_UP'
-              : (
-                  {
-                    Locate: 'LOCATE',
-                    Tap: 'CLICK',
-                    Input: 'TYPE_TEXT',
-                    Scroll: 'SCROLL_DOWN',
-                  } as const
-                )[options.direct.type]
-            : selected(response, request, 'operation');
+          const operation: TreeOnlyAction = resolvedDirect
+            ? operationFromDirect(resolvedDirect)
+            : (selected(response, request, 'operation') as TreeOnlyAction);
           const target = ['CLICK', 'TYPE_TEXT', 'LOCATE'].includes(operation)
             ? selected(response, request, `target_${operation}`)
             : undefined;
@@ -301,10 +418,14 @@ export async function runTreeOnly(
               'Jev selected an unknown target',
               'malformed',
             );
-          let value = options.direct?.param.value;
-          if (operation === 'TYPE_TEXT' && !options.direct)
+          let value = resolvedDirect?.param.value;
+          if (
+            operation === 'TYPE_TEXT' &&
+            typeof value !== 'string' &&
+            !options.direct
+          )
             value = await options.typeText({
-              goal: options.context.instruction,
+              goal,
               field: node!,
               page: capture.page,
               recent_actions: history.slice(-10),
@@ -320,10 +441,16 @@ export async function runTreeOnly(
                 operation as 'CLICK' | 'TYPE_TEXT' | 'LOCATE',
               )
             : undefined;
-          return { operation, target, node, value, located };
-        },
-      );
-      const { operation, target, node, value, located } = decision;
+          return {
+            operation,
+            target,
+            node,
+            value,
+            located,
+            directParam: resolvedDirect?.param,
+          };
+        });
+      const { operation, target, node, value, located, directParam } = decision;
       const fingerprint = JSON.stringify({
         page: capture?.page,
         nodes: capture?.snapshot.nodes,
@@ -376,8 +503,8 @@ export async function runTreeOnly(
           : operation === 'TYPE_TEXT'
             ? 'Input'
             : 'Scroll';
-      const param: Record<string, any> = options.direct
-        ? { ...options.direct.param }
+      const param: Record<string, any> = directParam
+        ? { ...directParam }
         : type === 'Scroll'
           ? {
               direction: operation === 'SCROLL_UP' ? 'up' : 'down',
@@ -386,6 +513,7 @@ export async function runTreeOnly(
           : type === 'Input'
             ? { value }
             : {};
+      if (type === 'Input' && param.value === undefined) param.value = value;
       if (located) param.locate = located;
       else param.locate = undefined;
       const entry: TreeOnlyHistoryEntry = {

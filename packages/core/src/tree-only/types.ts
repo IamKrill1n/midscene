@@ -60,6 +60,10 @@ export interface TreeOnlyOperationContext {
   operationId: string;
   kind: TreeOnlyOperationKind;
   instruction: string;
+  /** Resolved public AI context for this operation (call wins over agent). */
+  actionContext?: string;
+  /** Revised action/operation-local context for planner recovery (T3). */
+  recoveryContext?: string;
   effectiveMode: TreeOnlyInputMode;
   modeSource: TreeOnlyModeSource;
   /** Operation deadline in milliseconds; recovery never extends it. */
