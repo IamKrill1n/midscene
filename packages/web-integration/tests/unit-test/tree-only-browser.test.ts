@@ -288,6 +288,83 @@ describe('tree-only browser integration (no paid APIs)', () => {
     }
   });
 
+  it('reports the live target meaning at validation time', async () => {
+    const page = await browser.newPage();
+    try {
+      await page.setContent(html);
+      const agent = new PlaywrightAgent(page, {
+        inputMode: 'tree-only',
+        generateReport: false,
+      });
+      const capture = await agent.interface.treeOnly.capture();
+      const ref = capture.snapshot.nodes.find(
+        (node) => node.name === 'Save',
+      )!.ref;
+      await page
+        .locator('button')
+        .first()
+        .evaluate((element) => {
+          element.textContent = 'Delete';
+        });
+      const validated = await capture.validate(ref, 'CLICK');
+      expect(validated.observation).toMatchObject({
+        role: 'button',
+        name: 'Delete',
+      });
+      expect(validated.element.center).toHaveLength(2);
+      await capture.release();
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('refuses to execute after the selected target changed meaning', async () => {
+    const page = await browser.newPage();
+    try {
+      await page.setContent(html);
+      const agent = new PlaywrightAgent(page, {
+        inputMode: 'tree-only',
+        generateReport: false,
+        waitAfterAction: 0,
+      });
+      const run = agent.taskExecutor.runTreeOnly.bind(agent.taskExecutor);
+      let calls = 0;
+      rs.spyOn(agent.taskExecutor, 'runTreeOnly').mockImplementation(
+        (options) =>
+          run({
+            ...options,
+            evaluate: async (request) => {
+              calls += 1;
+              if (calls === 1) {
+                await page.evaluate(() => {
+                  document.querySelector('button')!.textContent = 'Delete';
+                });
+              }
+              const state = JSON.parse(request.state);
+              const node = state.elements.find(
+                (element: { name?: string }) => element.name === 'Save',
+              );
+              return {
+                model: 'mock-jev',
+                answers: request.questions.map((question) => ({
+                  questionId: question.id,
+                  kind: 'choice' as const,
+                  optionId:
+                    question.id === 'target_CLICK'
+                      ? (node?.ref ?? 'no-match')
+                      : 'no-match',
+                })),
+              };
+            },
+          }),
+      );
+      await expect(agent.aiTap('Save')).rejects.toThrow();
+      expect(await page.locator('output').textContent()).toBe('');
+    } finally {
+      await page.close();
+    }
+  });
+
   it('captures the fixed observation fixture with distinguishable targets', async () => {
     const page = await browser.newPage();
     try {

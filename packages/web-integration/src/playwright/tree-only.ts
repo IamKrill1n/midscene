@@ -1,7 +1,18 @@
 import type { TreeOnlyBrowserAdapter } from '@midscene/core/tree-only';
 import { TreeOnlyOperationError } from '@midscene/core/tree-only';
 import type { WebPage } from './page';
-import { captureTreeOnlyBrowserSnapshot } from './snapshot-collector';
+import {
+  TREE_ONLY_LIVE_OBSERVATION_HELPERS_SCRIPT,
+  captureTreeOnlyBrowserSnapshot,
+} from './snapshot-collector';
+
+/** Live accessibility helpers installed at capture time. */
+interface TreeOnlyAccessibilityHelpers {
+  roleOf(element: Element): string | null;
+  nameOf(element: Element, seen: Set<Element>): string;
+  textOf(element: Element): string;
+  stateOf(element: Element): Record<string, string | boolean>;
+}
 
 /** Keep real DOM identities in a private handle, never in Jev's JSON. */
 export function createPlaywrightTreeOnlyAdapter(
@@ -21,6 +32,7 @@ export function createPlaywrightTreeOnlyAdapter(
           window as unknown as { midsceneNodeHashCache?: Map<string, Node> }
         ).midsceneNodeHashCache = new Map();
       });
+      await page.evaluate(TREE_ONLY_LIVE_OBSERVATION_HELPERS_SCRIPT);
       const collected = await captureTreeOnlyBrowserSnapshot(webPage);
       const identities = [...collected.backend].map(([ref, backend]) => [
         ref,
@@ -120,6 +132,13 @@ export function createPlaywrightTreeOnlyAdapter(
                 }
                 if (!hit || !(element === hit || element.contains(hit)))
                   return { error: 'obstructed' } as const;
+                const helpers = (
+                  window as unknown as {
+                    midsceneTreeOnlyAccessibility?: TreeOnlyAccessibilityHelpers;
+                  }
+                ).midsceneTreeOnlyAccessibility;
+                if (!helpers) return { error: 'unverifiable' } as const;
+                const role = helpers.roleOf(element);
                 return {
                   center,
                   rect: {
@@ -128,6 +147,12 @@ export function createPlaywrightTreeOnlyAdapter(
                     width: rect.width,
                     height: rect.height,
                   },
+                  observation: {
+                    ...(role ? { role } : {}),
+                    name: helpers.nameOf(element, new Set()),
+                    text: helpers.textOf(element),
+                    state: helpers.stateOf(element),
+                  },
                 };
               },
               { ref, action },
@@ -135,11 +160,22 @@ export function createPlaywrightTreeOnlyAdapter(
             if ('error' in result)
               throw new TreeOnlyOperationError(
                 `Tree target ${ref} is ${result.error}`,
-                result.error === 'stale' ? 'stale-target' : 'obstruction',
+                result.error === 'obstructed'
+                  ? 'obstruction'
+                  : result.error === 'unverifiable'
+                    ? 'service-failure'
+                    : 'stale-target',
               );
+            const { observation, ...element } = result;
             return {
-              ...result,
-              description: collected.resolver.resolve(ref)?.name ?? ref,
+              element: {
+                ...element,
+                description:
+                  observation.name ||
+                  collected.resolver.resolve(ref)?.name ||
+                  ref,
+              },
+              observation,
             };
           },
           async release() {

@@ -138,9 +138,7 @@ const TREE_ONLY_RESET_NODE_CACHE_SCRIPT = `(() => {
  * node hash, and returns only elements with a recognized role so
  * structural containers stay name-free.
  */
-const TREE_ONLY_ACCESSIBILITY_SCRIPT_PREFIX = `(() => {
-  const cache = window.midsceneNodeHashCache;
-  if (!(cache instanceof Map)) return null;
+const TREE_ONLY_ACCESSIBILITY_HELPERS = `
   const supportedRoles = new Set([
     'button','link','checkbox','radio','switch','tab','menuitem',
     'menuitemradio','menuitemcheckbox','option','gridcell','combobox',
@@ -227,7 +225,28 @@ const TREE_ONLY_ACCESSIBILITY_SCRIPT_PREFIX = `(() => {
     if (element.tagName === 'INPUT' && element.type) state.inputType = element.type;
     return state;
   };
+`;
+
+const TREE_ONLY_ACCESSIBILITY_SCRIPT_PREFIX = `(() => {
+  const cache = window.midsceneNodeHashCache;
+  if (!(cache instanceof Map)) return null;
+${TREE_ONLY_ACCESSIBILITY_HELPERS}
   const ids = `;
+
+/**
+ * Install the shared in-page accessibility helpers on
+ * `window.midsceneTreeOnlyAccessibility`. T3 live target validation reads
+ * role, name, and state through these exact helpers, so the meaning
+ * compared before dispatch is computed the same way as the meaning the
+ * snapshot recorded.
+ */
+export const TREE_ONLY_LIVE_OBSERVATION_HELPERS_SCRIPT = `(() => {
+  window.midsceneTreeOnlyAccessibility = (() => {
+${TREE_ONLY_ACCESSIBILITY_HELPERS}
+    return { textOf, nameOf, roleOf, stateOf };
+  })();
+  return true;
+})()`;
 
 function buildAccessibilityScript(ids: readonly string[]): string {
   return `${TREE_ONLY_ACCESSIBILITY_SCRIPT_PREFIX}${JSON.stringify([...ids])};
