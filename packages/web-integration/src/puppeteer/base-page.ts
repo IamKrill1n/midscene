@@ -46,6 +46,8 @@ import { selectAllInputScript } from '../common/input-scripts';
 import {
   type KeyInput,
   type MouseButton,
+  type WebInputControl,
+  type WebInputTarget,
   commonWebActionsForWebPage,
 } from '../web-page';
 
@@ -192,6 +194,87 @@ function jpegSizeFromBase64(data: string): Size | undefined {
   }
 
   return undefined;
+}
+
+/** True when a locate target carries finite logical coordinates. */
+function hasFiniteInputCenter(
+  target?: WebInputTarget,
+): target is WebInputTarget & { center: [number, number] } {
+  const center = target?.center;
+  return Boolean(
+    center && Number.isFinite(center[0]) && Number.isFinite(center[1]),
+  );
+}
+
+/**
+ * Browser-realm helper shared by `readInputControl` and `setInputValue`.
+ * Self-contained because Playwright/Puppeteer serialize it into the page.
+ * It reads the control at a point; when `nextValue` is supplied it also
+ * enters that value through the native setter and announces it with
+ * input/change events.
+ */
+/* istanbul ignore next -- closure is serialized to the browser realm via page.evaluate, where istanbul's cov_* counter does not exist */
+function readOrEnterWebInputControl(input: {
+  x: number;
+  y: number;
+  nextValue?: string;
+}): WebInputControl | undefined {
+  const resolveControl = (
+    start: Element | null,
+  ): HTMLInputElement | HTMLTextAreaElement | null => {
+    if (!start) {
+      return null;
+    }
+    const closest = start.closest('input, textarea');
+    if (
+      closest instanceof HTMLInputElement ||
+      closest instanceof HTMLTextAreaElement
+    ) {
+      return closest;
+    }
+    const label = start.closest('label');
+    const labeled = label instanceof HTMLLabelElement ? label.control : null;
+    return labeled instanceof HTMLInputElement ||
+      labeled instanceof HTMLTextAreaElement
+      ? labeled
+      : null;
+  };
+  let hit = document.elementFromPoint(input.x, input.y);
+  while (hit?.shadowRoot) {
+    const inner = hit.shadowRoot.elementFromPoint(input.x, input.y);
+    if (!inner || inner === hit) {
+      break;
+    }
+    hit = inner;
+  }
+  const control = resolveControl(hit);
+  if (!control) {
+    return undefined;
+  }
+  if (typeof input.nextValue === 'string') {
+    const prototype =
+      control instanceof HTMLInputElement
+        ? HTMLInputElement.prototype
+        : HTMLTextAreaElement.prototype;
+    const valueSetter = Object.getOwnPropertyDescriptor(
+      prototype,
+      'value',
+    )?.set;
+    if (!valueSetter) {
+      return undefined;
+    }
+    valueSetter.call(control, input.nextValue);
+    control.dispatchEvent(
+      new Event('input', { bubbles: true, composed: true }),
+    );
+    control.dispatchEvent(new Event('change', { bubbles: true }));
+  }
+  return {
+    tagName: control instanceof HTMLInputElement ? 'input' : 'textarea',
+    type: control instanceof HTMLInputElement ? control.type : '',
+    value: control.value,
+    readOnly: control.readOnly,
+  };
 }
 
 export class Page<
@@ -1152,6 +1235,33 @@ export class Page<
     } finally {
       debugPage('clearInput end');
     }
+  }
+
+  async readInputControl(
+    target?: WebInputTarget,
+  ): Promise<WebInputControl | undefined> {
+    if (!hasFiniteInputCenter(target)) {
+      return undefined;
+    }
+    return this.evaluate(readOrEnterWebInputControl, {
+      x: target.center[0],
+      y: target.center[1],
+    });
+  }
+
+  async setInputValue(
+    target?: WebInputTarget,
+    value?: string,
+  ): Promise<boolean> {
+    if (!hasFiniteInputCenter(target) || typeof value !== 'string') {
+      return false;
+    }
+    const control = await this.evaluate(readOrEnterWebInputControl, {
+      x: target.center[0],
+      y: target.center[1],
+      nextValue: value,
+    });
+    return control !== undefined;
   }
 
   private everMoved = false;

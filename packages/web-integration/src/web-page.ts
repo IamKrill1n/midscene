@@ -10,6 +10,7 @@ import {
   resolveTextInputOptions,
   sendTextSequentially,
 } from '@midscene/core/device';
+import { TreeOnlyOperationError } from '@midscene/core/tree-only';
 
 import { sleep } from '@midscene/core/utils';
 import type { ElementInfo } from '@midscene/shared/extractor';
@@ -371,6 +372,20 @@ export interface ChromePageDestroyOptions {
   closeTab?: boolean; // should close the tab when the page object is destroyed
 }
 
+/** Live facts about the input/textarea under a locate target. */
+export interface WebInputControl {
+  tagName: 'input' | 'textarea';
+  /** `input.type` for inputs; empty for textareas. */
+  type: string;
+  value: string;
+  readOnly: boolean;
+}
+
+/** Locate-point coordinates of an input target. */
+export interface WebInputTarget {
+  center?: [number, number];
+}
+
 export abstract class AbstractWebPage extends AbstractInterface {
   readonly keyboardTypeDelay?: number;
   readonly inputStrategy?: InputStrategy;
@@ -422,6 +437,23 @@ export abstract class AbstractWebPage extends AbstractInterface {
     throw new Error('Bulk text input is not supported by this web page');
   }
 
+  /**
+   * Read the live control at a locate point, if any. Platforms that support
+   * value verification and native temporal inputs implement this; callers
+   * treat it as optional so mocked pages keep working.
+   */
+  readInputControl?(
+    target?: WebInputTarget,
+  ): Promise<WebInputControl | undefined>;
+
+  /**
+   * Enter a value into the control at a locate point through the native value
+   * setter plus input/change events. Used for inputs whose value Chromium
+   * does not accept from synthetic key events (date, time, month, week).
+   * Returns whether a control was found and updated.
+   */
+  setInputValue?(target?: WebInputTarget, value?: string): Promise<boolean>;
+
   abstract scrollUntilTop(startingPoint?: Point): Promise<void>;
   abstract scrollUntilBottom(startingPoint?: Point): Promise<void>;
   abstract scrollUntilLeft(startingPoint?: Point): Promise<void>;
@@ -464,6 +496,104 @@ const scheduleWebVisualUpdate = (
   void pendingRefresh?.catch(() => undefined);
 };
 
+/**
+ * Native temporal inputs cannot be filled with synthetic key events in
+ * Chromium: the key events reach the browser but never update the value.
+ * Their value must be assigned through the native setter and announced with
+ * input/change events so frameworks observe the entry.
+ */
+const TEMPORAL_INPUT_TYPES = new Set([
+  'date',
+  'time',
+  'datetime-local',
+  'month',
+  'week',
+]);
+
+/**
+ * Input types whose `value` is the verbatim entered text. Types that
+ * normalize, sanitize, or mask their value (`number` formats, `email`/`url`
+ * strip surrounding whitespace) are not verified: a readback difference
+ * there is not proof that entry failed.
+ */
+const VERBATIM_INPUT_TYPES = new Set([
+  'text',
+  'search',
+  'tel',
+  'password',
+  ...TEMPORAL_INPUT_TYPES,
+]);
+
+function verifiableInputControl(control: WebInputControl): boolean {
+  return (
+    control.tagName === 'textarea' || VERBATIM_INPUT_TYPES.has(control.type)
+  );
+}
+
+/**
+ * Read a control without letting an unreadable page replace the existing
+ * typing behavior: verification and temporal-input fill are enhancements,
+ * so a failed read means "cannot verify", not "entry failed".
+ */
+async function readInputControlSafely(
+  page: AbstractWebPage,
+  target: unknown,
+): Promise<WebInputControl | undefined> {
+  if (!page.readInputControl) {
+    return undefined;
+  }
+  try {
+    return await page.readInputControl(target as WebInputTarget);
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Verify entered text by reading the live control back. A returned typing
+ * call is not proof of entry: a control can reject the value or re-render
+ * without it. Reads are inspection only, never a re-dispatch. A mismatch is
+ * reported as an `unsupported-input` TreeOnlyOperationError so the execution
+ * outcome contract can treat it as a permanent input failure; visual callers
+ * see the same hard failure.
+ */
+async function verifyEnteredInputValue(
+  page: AbstractWebPage,
+  target: unknown,
+  expected: string,
+  initial: WebInputControl,
+): Promise<void> {
+  if (!page.readInputControl || !verifiableInputControl(initial)) {
+    return;
+  }
+  let lastValue = initial.value;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const control = await readInputControlSafely(page, target);
+    if (!control || !verifiableInputControl(control)) {
+      return;
+    }
+    lastValue = control.value;
+    if (control.value === expected) {
+      return;
+    }
+    if (attempt < 2) {
+      await sleep(100);
+    }
+  }
+  const subject =
+    `the ${initial.tagName}` +
+    `${initial.type ? `[type=${initial.type}]` : ''} control`;
+  // Never echo credential values into errors, reports, or logs.
+  const detail =
+    initial.type === 'password'
+      ? `read back ${lastValue ? 'a different value' : 'an empty value'}`
+      : `expected ${JSON.stringify(expected)}, read back ${JSON.stringify(lastValue)}`;
+  throw new TreeOnlyOperationError(
+    `Input value was not retained by ${subject}: ${detail}`,
+    'unsupported-input',
+  );
+}
+
 export function createWebInputPrimitives(
   page: AbstractWebPage,
 ): BrowserInputPrimitives {
@@ -503,6 +633,31 @@ export function createWebInputPrimitives(
           opts,
           page,
         );
+        // Read the live control before touching it: native temporal inputs
+        // reject synthetic key events and every entry is read back after.
+        const control =
+          element && !opts?.focusOnly
+            ? await readInputControlSafely(page, element)
+            : undefined;
+        // Temporal controls have no cursor to insert at, so replace and
+        // typeOnly both enter the requested value directly.
+        if (
+          element &&
+          control &&
+          control.tagName === 'input' &&
+          TEMPORAL_INPUT_TYPES.has(control.type) &&
+          page.setInputValue
+        ) {
+          const applied = await page.setInputValue(
+            element as WebInputTarget,
+            value,
+          );
+          if (applied) {
+            await verifyEnteredInputValue(page, element, value, control);
+            scheduleVisualUpdate();
+            return;
+          }
+        }
         if (element && opts?.replace !== false) {
           if (inputStrategy === 'bulk') {
             // Keep the current value selected so insertText replaces it in one
@@ -550,6 +705,11 @@ export function createWebInputPrimitives(
               ? undefined
               : { delay: keyboardTypeDelay };
           await page.keyboard.type(value, keyboardTypeOptions);
+        }
+        // `typeOnly` inserts at the cursor, so the resulting value depends on
+        // the prior state and cannot be compared to the requested text.
+        if (element && control && opts?.replace !== false) {
+          await verifyEnteredInputValue(page, element, value, control);
         }
         scheduleVisualUpdate();
       },

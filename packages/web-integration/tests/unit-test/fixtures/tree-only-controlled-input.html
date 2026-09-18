@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Tree-only controlled input fixture</title>
+    <style>
+      body {
+        margin: 0;
+        font-family: sans-serif;
+      }
+      main {
+        display: grid;
+        gap: 12px;
+        padding: 16px;
+        max-width: 360px;
+      }
+      label {
+        display: block;
+      }
+      input {
+        width: 100%;
+        height: 32px;
+        box-sizing: border-box;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <!-- Mirrors V_BookingView: controlled native date inputs and a
+           Confirm button that stays disabled until a date lands in state. -->
+      <div>
+        <label for="hourlyDate">Date</label>
+        <input id="hourlyDate" type="date" />
+      </div>
+      <div>
+        <label for="checkIn">Check-in Date</label>
+        <input id="checkIn" type="date" />
+      </div>
+      <div>
+        <label for="checkOut">Check-out Date</label>
+        <input id="checkOut" type="date" />
+      </div>
+      <div>
+        <label for="fullName">Full name</label>
+        <input id="fullName" type="text" />
+      </div>
+      <div>
+        <label for="rejecting">Rejecting field</label>
+        <input id="rejecting" type="text" />
+      </div>
+      <div>
+        <label for="rejectingSecret">Rejecting secret</label>
+        <input id="rejectingSecret" type="password" />
+      </div>
+      <p id="state"></p>
+      <button id="confirm" type="button" disabled>Confirm Booking</button>
+    </main>
+    <script>
+      // Controlled inputs: the app owns each value and re-renders the DOM
+      // from state on every input event, like the React booking form.
+      const state = {
+        hourlyDate: "",
+        checkIn: "",
+        checkOut: "",
+        fullName: "",
+      };
+      const confirm = document.getElementById("confirm");
+      const stateLabel = document.getElementById("state");
+
+      function syncConfirm() {
+        confirm.disabled = !(
+          state.hourlyDate ||
+          (state.checkIn && state.checkOut)
+        );
+      }
+
+      for (const id of ["hourlyDate", "checkIn", "checkOut", "fullName"]) {
+        const input = document.getElementById(id);
+        input.addEventListener("input", () => {
+          state[id] = input.value;
+          // The controlled re-render writes state back into the DOM.
+          input.value = state[id];
+          stateLabel.setAttribute(`data-${id}`, state[id]);
+          syncConfirm();
+        });
+      }
+
+      // Controls that silently reject every input event: the requested value
+      // never lands in state, so it must be reported as a failure. The event
+      // count proves physical entry happened exactly once.
+      for (const id of ["rejecting", "rejectingSecret"]) {
+        const rejecting = document.getElementById(id);
+        rejecting.dataset.inputEvents = "0";
+        rejecting.addEventListener("input", () => {
+          rejecting.value = "";
+          rejecting.dataset.inputEvents = String(
+            Number(rejecting.dataset.inputEvents) + 1,
+          );
+        });
+      }
+    </script>
+  </body>
+</html>
