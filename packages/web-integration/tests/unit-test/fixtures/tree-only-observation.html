@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Tree-only observation fixture</title>
+    <style>
+      body {
+        margin: 0;
+        font-family: sans-serif;
+      }
+      header {
+        display: flex;
+        gap: 16px;
+        align-items: center;
+        padding: 16px;
+      }
+      main {
+        padding: 16px;
+      }
+      #below {
+        margin-top: 1400px;
+        padding: 16px;
+      }
+      /* The nested link/button wrapper is one physical target whose two
+         DOM nodes report identical geometry. */
+      article {
+        max-width: 320px;
+      }
+      article a {
+        display: block;
+      }
+      article a button {
+        display: block;
+        width: 100%;
+        height: 36px;
+        margin: 0;
+        padding: 0;
+        border: 0;
+      }
+    </style>
+  </head>
+  <body>
+    <!-- Reproduces the demonstrated header shape: text-only anchors. -->
+    <header>
+      <a href="/">Homestay</a>
+      <form>
+        <input type="search" placeholder="Search homestays..." />
+      </form>
+      <nav>
+        <a href="/">Home</a>
+        <a href="/login">Login</a>
+        <a href="/register">Register</a>
+      </nav>
+    </header>
+
+    <!-- Reproduces Radix-style checkbox buttons with `label[for]`. -->
+    <section id="filters">
+      <button
+        type="button"
+        role="checkbox"
+        aria-checked="false"
+        value="on"
+        id="WiFi"
+      ></button>
+      <label for="WiFi">WiFi</label>
+      <button
+        type="button"
+        role="checkbox"
+        aria-checked="false"
+        value="on"
+        id="Kitchen"
+      ></button>
+      <label for="Kitchen">Kitchen</label>
+      <button
+        type="button"
+        role="checkbox"
+        aria-checked="false"
+        value="on"
+        id="TV"
+      ></button>
+      <label for="TV">TV</label>
+      <button
+        type="button"
+        role="combobox"
+        aria-controls="stays-menu"
+        aria-expanded="false"
+      >
+        All Stays
+      </button>
+      <label>City <input id="city" value="" /></label>
+      <input type="file" aria-label="Upload photo" />
+    </section>
+
+    <!-- Reproduces the nested link/button "View Details" wrapper. -->
+    <main>
+      <article>
+        <h2>Coastal Homestay</h2>
+        <a class="w-full" href="/homestay/1"
+          ><button type="button">View Details</button></a
+        >
+      </article>
+    </main>
+
+    <article id="below">
+      <h2>Sa Pa Mountain Retreat</h2>
+      <a class="w-full" href="/homestay/2"
+        ><button type="button">View Details</button></a
+      >
+    </article>
+
+    <script>
+      document.querySelectorAll('button[role="checkbox"]').forEach((button) => {
+        button.addEventListener("click", () => {
+          const next =
+            button.getAttribute("aria-checked") === "true" ? "false" : "true";
+          button.setAttribute("aria-checked", next);
+        });
+      });
+    </script>
+  </body>
+</html>

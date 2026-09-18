@@ -1,5 +1,6 @@
 import { NodeType } from '../constants/index';
 import type {
+  TreeOnlyAccessibilityOverride,
   TreeOnlyBounds,
   TreeOnlyBrowserNode,
   TreeOnlyBrowserSnapshot,
@@ -84,6 +85,15 @@ export interface TreeOnlyBrowserCollectOptions {
   captureError?: string;
   /** Delivery budget; defaults to {@link TREE_ONLY_BROWSER_DEFAULT_MAX_NODES}. */
   maxNodes?: number;
+  /**
+   * In-page accessibility overrides keyed by {@link ElementInfo.id}
+   * (the extractor's node hash). Values are computed from the live DOM
+   * right after extraction: accessible names that need label/aria
+   * resolution, explicit roles for supported controls, and truthful
+   * native/ARIA state. Extraction-derived fields remain the fallback
+   * when a key is missing.
+   */
+  accessibility?: Readonly<Record<string, TreeOnlyAccessibilityOverride>>;
 }
 
 export interface TreeOnlyBackendRef {
@@ -120,7 +130,45 @@ function nextSnapshotId(): string {
   return `snap-${Date.now().toString(36)}-${collectCounter}`;
 }
 
-function roleForElement(info: ElementInfo): string {
+/**
+ * Roles an in-page accessibility override may contribute. Restricted to
+ * controls the tree-only action set understands, so a DOM role never
+ * promises an operation the integration cannot execute (for example a
+ * Radix `button[role=combobox]` keeps its extractor role `button` and
+ * stays clickable).
+ */
+const TREE_ONLY_ACCESSIBILITY_ROLES = new Set([
+  'button',
+  'link',
+  'checkbox',
+  'radio',
+  'switch',
+  'tab',
+  'menuitem',
+  'menuitemradio',
+  'menuitemcheckbox',
+  'option',
+  'textbox',
+  'searchbox',
+  'spinbutton',
+]);
+
+const TREE_ONLY_ACCESSIBILITY_ROLE_ALIASES: Record<string, string> = {
+  menuitemradio: 'menuitem',
+  menuitemcheckbox: 'menuitem',
+};
+
+function overrideRole(role: string | undefined): string | undefined {
+  if (!role || !TREE_ONLY_ACCESSIBILITY_ROLES.has(role)) return undefined;
+  return TREE_ONLY_ACCESSIBILITY_ROLE_ALIASES[role] ?? role;
+}
+
+function roleForElement(
+  info: ElementInfo,
+  override?: TreeOnlyAccessibilityOverride,
+): string {
+  const role = overrideRole(override?.role);
+  if (role) return role;
   switch (info.nodeType) {
     case NodeType.BUTTON:
       return 'button';
@@ -134,7 +182,8 @@ function roleForElement(info: ElementInfo): string {
       if (tag.includes('textarea')) return 'textbox';
       if (inputType === 'checkbox') return 'checkbox';
       if (inputType === 'radio') return 'radio';
-      if (inputType === 'submit' || inputType === 'button') return 'button';
+      if (['submit', 'button', 'reset', 'image'].includes(inputType))
+        return 'button';
       return 'textbox';
     }
     case NodeType.IMG:
@@ -152,30 +201,48 @@ function present(value: string | undefined): string | undefined {
   return trimmed ? trimmed : undefined;
 }
 
+/**
+ * Truthful boolean state. Native boolean attributes are true when
+ * present; ARIA boolean attributes carry an explicit "true"/"false"
+ * value, so `aria-checked="false"` must never be reported as checked.
+ */
+function booleanState(
+  attributes: Record<string, string>,
+  nativeName: string | undefined,
+  ariaName: string,
+): boolean | undefined {
+  if (nativeName && attributes[nativeName] !== undefined) return true;
+  const aria = attributes[ariaName];
+  if (aria === undefined) return undefined;
+  return aria !== 'false';
+}
+
 function stateForElement(
   info: ElementInfo,
+  override?: TreeOnlyAccessibilityOverride,
 ): Record<string, string | boolean> | undefined {
   const state: Record<string, string | boolean> = {};
   const attributes = info.attributes ?? {};
-  const flag = (names: string[]) => {
-    for (const name of names) {
-      if (attributes[name] !== undefined) return true;
-    }
-    return undefined;
-  };
-  const disabled = flag(['disabled', 'aria-disabled']);
+  const disabled = booleanState(attributes, 'disabled', 'aria-disabled');
   if (disabled !== undefined) state.disabled = disabled;
-  const checked = flag(['checked', 'aria-checked']);
+  const checked = booleanState(attributes, 'checked', 'aria-checked');
   if (checked !== undefined) state.checked = checked;
-  const readonly = flag(['readonly', 'aria-readonly']);
+  const readonly = booleanState(attributes, 'readonly', 'aria-readonly');
   if (readonly !== undefined) state.readonly = readonly;
-  const required = flag(['required', 'aria-required']);
+  const required = booleanState(attributes, 'required', 'aria-required');
   if (required !== undefined) state.required = required;
-  const selected = flag(['selected', 'aria-selected']);
+  const selected = booleanState(attributes, 'selected', 'aria-selected');
   if (selected !== undefined) state.selected = selected;
+  const expanded = booleanState(attributes, undefined, 'aria-expanded');
+  if (expanded !== undefined) state.expanded = expanded;
   const inputType = present(attributes.type);
   if (info.nodeType === NodeType.FORM_ITEM && inputType) {
     state.inputType = inputType;
+  }
+  if (override?.state) {
+    for (const [key, value] of Object.entries(override.state)) {
+      if (value !== undefined) state[key] = value;
+    }
   }
   return Object.keys(state).length > 0 ? state : undefined;
 }
@@ -183,6 +250,7 @@ function stateForElement(
 function nameAndTextForElement(
   info: ElementInfo,
   role: string,
+  override?: TreeOnlyAccessibilityOverride,
 ): Pick<TreeOnlyBrowserNode, 'name' | 'text'> {
   const attributes = info.attributes ?? {};
   const content = present(info.content);
@@ -195,18 +263,25 @@ function nameAndTextForElement(
     // unrelated off-screen text into model evidence.
     return {};
   }
+  const overrideName = present(override?.name);
   if (role === 'img') {
     const name =
+      overrideName ??
       present(attributes.alt) ??
       present(attributes['aria-label']) ??
       present(attributes.title);
     return name ? { name } : {};
   }
+  // Checkbox-like controls store form-submission values in `value`
+  // (browsers default it to "on"); that is not an accessible name.
+  const valueIsNotAName =
+    role === 'checkbox' || role === 'radio' || role === 'switch';
   const name =
+    overrideName ??
     present(attributes['aria-label']) ??
     content ??
     present(attributes.placeholder) ??
-    present(attributes.value) ??
+    (valueIsNotAName ? undefined : present(attributes.value)) ??
     present(attributes.alt) ??
     present(attributes.title);
   if (!name && !content) return {};
@@ -255,24 +330,78 @@ interface PendingEntry {
   structural: boolean;
 }
 
+/** Roles that carry a tree-only click; used for nested-duplicate collapse. */
+const TREE_ONLY_INTERACTIVE_ROLES = new Set([
+  'button',
+  'link',
+  'checkbox',
+  'radio',
+  'switch',
+  'tab',
+  'menuitem',
+  'option',
+]);
+
+interface EnclosingInteractive {
+  label: string;
+  bounds: Rect;
+}
+
+function entryLabel(
+  info: ElementInfo,
+  role: string,
+  override?: TreeOnlyAccessibilityOverride,
+): string {
+  const described = nameAndTextForElement(info, role, override);
+  return present(described.name) ?? present(described.text) ?? '';
+}
+
 function collectPendingEntries(
   tree: ElementTreeNode<ElementInfo> | null | undefined,
   intersectsViewport: (bounds: Rect) => boolean,
+  accessibility?: Readonly<Record<string, TreeOnlyAccessibilityOverride>>,
 ): PendingEntry[] {
   const visit = (
     node: ElementTreeNode<ElementInfo> | null | undefined,
+    enclosingInteractive?: EnclosingInteractive,
   ): PendingEntry[] => {
-    if (!node) return [];
-    const childEntries: PendingEntry[] = [];
-    for (const child of node.children ?? []) {
-      childEntries.push(...visit(child));
-    }
     // Null shells promote their children to the upper layer.
-    if (!node.node) return childEntries;
+    if (!node) return [];
+    const promoteChildren = (
+      enclosing: EnclosingInteractive | undefined,
+    ): PendingEntry[] => {
+      const promoted: PendingEntry[] = [];
+      for (const child of node.children ?? []) {
+        promoted.push(...visit(child, enclosing));
+      }
+      return promoted;
+    };
+    if (!node.node) return promoteChildren(enclosingInteractive);
     const info = node.node;
-    if (!info.isVisible) return childEntries;
-    const role = roleForElement(info);
+    const override = accessibility?.[info.id];
+    if (!info.isVisible) return promoteChildren(enclosingInteractive);
+    const role = roleForElement(info, override);
     const bounds = toAvailableBounds(info.rect);
+    if (
+      bounds !== null &&
+      TREE_ONLY_INTERACTIVE_ROLES.has(role) &&
+      enclosingInteractive &&
+      sameBounds(enclosingInteractive.bounds, bounds)
+    ) {
+      // A nested interactive node at the exact same geometry is a
+      // wrapper artifact (for example `<a><button>View Details</button></a>`):
+      // one physical target, two truthful DOM nodes. Keep the outer node;
+      // its hit test accepts the inner element and the click bubbles.
+      const label = entryLabel(info, role, override);
+      if (label !== '' && label === enclosingInteractive.label) {
+        return promoteChildren(enclosingInteractive);
+      }
+    }
+    const nextEnclosing =
+      bounds !== null && TREE_ONLY_INTERACTIVE_ROLES.has(role)
+        ? { label: entryLabel(info, role, override), bounds }
+        : enclosingInteractive;
+    const childEntries = promoteChildren(nextEnclosing);
     if (bounds && !intersectsViewport(bounds)) {
       // Fully off-screen leaves are excluded. An off-screen container
       // with visible descendants is retained as a structural shell with
@@ -310,6 +439,13 @@ function isContainerRole(role: string): boolean {
  * - CSS classes, inline styles, and other browser internals are dropped
  *   at collection; only roles, names, states, text, structure, frame or
  *   shadow boundaries, and geometry cross the boundary.
+ * - Nested interactive nodes at the exact same geometry with the same
+ *   label collapse into the outer node: they are one physical target
+ *   (for example a button wrapped in an anchor), so duplicate choices
+ *   and duplicate refs never reach the model.
+ * - Optional in-page accessibility overrides supply accessible names
+ *   that need label/aria resolution, supported explicit roles, and
+ *   truthful native/ARIA state; extraction fields stay the fallback.
  * - References are minted per snapshot (`r1`, `r2`, ...) and resolve only
  *   through the returned private resolver. Content that looks like an
  *   ARIA `[ref=...]` marker never becomes a reference.
@@ -361,7 +497,8 @@ export function collectTreeOnlyBrowserSnapshot(
     return clipToViewport(bounds, viewport) !== null;
   };
 
-  const source = collectPendingEntries(tree, intersectsViewport);
+  const accessibility = options.accessibility;
+  const source = collectPendingEntries(tree, intersectsViewport, accessibility);
   const nodes: TreeOnlyBrowserNode[] = [];
   const backendByRef = new Map<string, TreeOnlyBackendRef>();
   let refCounter = 0;
@@ -370,8 +507,9 @@ export function collectTreeOnlyBrowserSnapshot(
     const { info, role } = entry;
     refCounter += 1;
     const ref = `r${refCounter}`;
-    const described = nameAndTextForElement(info, role);
-    const state = stateForElement(info);
+    const override = accessibility?.[info.id];
+    const described = nameAndTextForElement(info, role, override);
+    const state = stateForElement(info, override);
     const bounds = toAvailableBounds(info.rect);
     let clippedBounds: TreeOnlyBounds | undefined;
     if (bounds) {

@@ -178,6 +178,66 @@ describe('playwright tree-only snapshot capture', () => {
     expect(result.resolver.resolve('r3')?.text).toBe('three');
   });
 
+  it('applies in-page accessibility overrides from the live DOM pass', async () => {
+    const buttonLeaf = {
+      node: {
+        id: 'id-amenity',
+        indexId: 1,
+        nodeHashId: 'hash-amenity',
+        attributes: { nodeType: 'BUTTON Node' },
+        nodeType: 'BUTTON Node',
+        content: '',
+        rect: { left: 10, top: 10, width: 16, height: 16 },
+        center: [18, 18] as [number, number],
+        isVisible: true,
+      },
+      children: [],
+    };
+    const page = mockPage({
+      getElementsNodeTree: async () => ({ node: null, children: [buttonLeaf] }),
+      evaluateJavaScript: async (script: string) => {
+        if (script.includes('window.midsceneNodeHashCache = new Map'))
+          return true;
+        if (script.includes('window.midsceneNodeHashCache')) {
+          expect(script).toContain('"id-amenity"');
+          return {
+            'id-amenity': {
+              role: 'checkbox',
+              name: 'WiFi',
+              state: { checked: false, disabled: false },
+            },
+          };
+        }
+        return [];
+      },
+    });
+
+    const result = await captureTreeOnlyBrowserSnapshot(page, {
+      snapshotId: 'snap-web-a11y',
+    });
+    expect(result.snapshot.nodes[0]).toMatchObject({
+      role: 'checkbox',
+      name: 'WiFi',
+      state: { checked: false, disabled: false },
+    });
+  });
+
+  it('falls back to extractor evidence when the accessibility pass fails', async () => {
+    const page = mockPage({
+      evaluateJavaScript: async (script: string) => {
+        if (script.includes('window.midsceneNodeHashCache = new Map')) {
+          throw new Error('page closed');
+        }
+        throw new Error('page closed');
+      },
+    });
+    const result = await captureTreeOnlyBrowserSnapshot(page, {
+      snapshotId: 'snap-web-a11y-fallback',
+    });
+    expect(result.snapshot.base.status).toBe('success-nonempty');
+    expect(result.snapshot.nodes[0].text).toBe('hello');
+  });
+
   it('never routes capture through ariaSnapshot or screenshots', async () => {
     const page = mockPage();
     await captureTreeOnlyBrowserSnapshot(page, { snapshotId: 'snap-web-pure' });

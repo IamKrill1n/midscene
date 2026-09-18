@@ -1,3 +1,6 @@
+import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import {
   JEV_MODEL_ALIASES,
   JEV_REPRODUCIBLE_MODEL,
@@ -436,6 +439,57 @@ describe('jev transport evaluation', () => {
       'state',
     ]);
     expect(response.answers).toHaveLength(2);
+  });
+
+  it('writes opt-in evidence dumps for offline replay', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'jev-dump-'));
+    const previous = process.env.MIDSCENE_TREE_ONLY_JEVD_DUMP_DIR;
+    process.env.MIDSCENE_TREE_ONLY_JEVD_DUMP_DIR = dir;
+    try {
+      const caller = mockCaller({
+        model: 'jev-1.13.0',
+        answers: {
+          'q-target': { type: 'choice', choice: 'submit' },
+          'q-submitted': { type: 'noul', noul: 0.9 },
+        },
+        usage: { input_tokens: 3, output_tokens: 2 },
+      });
+      await evaluateJev(request, caller);
+
+      const files = await readdir(dir);
+      const requestFile = files.find((name) => name.endsWith('-request.json'));
+      const responseFile = files.find((name) =>
+        name.endsWith('-response.json'),
+      );
+      expect(requestFile).toBeDefined();
+      expect(responseFile).toBeDefined();
+
+      const requestDump = JSON.parse(
+        await readFile(join(dir, requestFile as string), 'utf8'),
+      );
+      expect(requestDump.sdkVersion).toBe(JEV_SDK_VERSION);
+      expect(requestDump.request.state).toBe(request.state);
+      expect(requestDump.request.questions).toEqual(
+        buildJevSystemOnePayload(request).questions,
+      );
+      expect(JSON.stringify(requestDump)).not.toContain('image');
+
+      const responseDump = JSON.parse(
+        await readFile(join(dir, responseFile as string), 'utf8'),
+      );
+      expect(responseDump.parsed.model).toBe('jev-1.13.0');
+      expect(responseDump.raw.usage).toEqual({
+        input_tokens: 3,
+        output_tokens: 2,
+      });
+    } finally {
+      if (previous === undefined) {
+        Reflect.deleteProperty(process.env, 'MIDSCENE_TREE_ONLY_JEVD_DUMP_DIR');
+      } else {
+        process.env.MIDSCENE_TREE_ONLY_JEVD_DUMP_DIR = previous;
+      }
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 });
 

@@ -1,3 +1,4 @@
+import { readFile } from 'node:fs/promises';
 import type { TreeOnlyRunOptions } from '@midscene/core/tree-only';
 import { afterAll, beforeAll, describe, expect, it, rs } from '@rstest/core';
 import { type Browser, chromium } from 'playwright';
@@ -151,6 +152,68 @@ describe('tree-only browser integration (no paid APIs)', () => {
         'obstructed',
       );
       await fresh.release();
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('captures the fixed observation fixture with distinguishable targets', async () => {
+    const page = await browser.newPage();
+    try {
+      const fixture = await readFile(
+        new URL('./fixtures/tree-only-observation.html', import.meta.url),
+        'utf8',
+      );
+      await page.setViewportSize({ width: 1280, height: 768 });
+      await page.setContent(fixture);
+      const agent = new PlaywrightAgent(page, {
+        inputMode: 'tree-only',
+        generateReport: false,
+        waitAfterAction: 0,
+      });
+      const screenshot = rs
+        .spyOn(agent.interface, 'screenshotBase64')
+        .mockRejectedValue(new Error('Screenshot must not be called'));
+      const states: Array<Record<string, any>> = [];
+      const evaluate = mockJev(agent, (request) => {
+        states.push(JSON.parse(request.state));
+        return { operation: 'CLICK', name: 'WiFi' };
+      });
+
+      await agent.aiTap('the WiFi amenity checkbox');
+      expect(await page.locator('#WiFi').getAttribute('aria-checked')).toBe(
+        'true',
+      );
+
+      const state = states[0];
+      const byName = (name: string) =>
+        state.elements.find((node: { name?: string }) => node.name === name);
+      expect(byName('Login')).toMatchObject({
+        role: 'link',
+        supported_operations: ['CLICK'],
+      });
+      expect(byName('Search homestays...')).toMatchObject({
+        role: 'searchbox',
+        supported_operations: ['CLICK', 'TYPE_TEXT'],
+      });
+      expect(byName('WiFi')).toMatchObject({
+        role: 'checkbox',
+        state: { checked: false },
+        supported_operations: ['CLICK'],
+      });
+      const viewDetails = state.elements.filter(
+        (node: { name?: string }) => node.name === 'View Details',
+      );
+      expect(viewDetails).toHaveLength(1);
+      expect(viewDetails[0].role).toBe('link');
+      const fileInput = state.elements.find(
+        (node: { state?: { inputType?: string } }) =>
+          node.state?.inputType === 'file',
+      );
+      expect(fileInput?.supported_operations ?? []).not.toContain('TYPE_TEXT');
+      expect(state.page.scroll.height).toBeGreaterThan(768);
+      expect(screenshot).not.toHaveBeenCalled();
+      expect(evaluate).toHaveBeenCalledTimes(1);
     } finally {
       await page.close();
     }

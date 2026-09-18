@@ -5,8 +5,12 @@ import {
   type TreeOnlyBrowserCollectResult,
   type TreeOnlyBrowserCollectViewport,
   collectTreeOnlyBrowserSnapshot,
+  treeToList,
 } from '@midscene/shared/extractor';
-import type { TreeOnlyCoverageGap } from '@midscene/shared/tree-only';
+import type {
+  TreeOnlyAccessibilityOverride,
+  TreeOnlyCoverageGap,
+} from '@midscene/shared/tree-only';
 
 /**
  * T05 Playwright browser capture for tree-only operation.
@@ -113,13 +117,194 @@ export async function probeInaccessibleFrames(
 }
 
 /**
+ * Reset the extractor's node identity cache before a capture. The cache
+ * maps `ElementInfo.id` (node hash) to the live DOM node; it must be
+ * empty so the accessibility pass below reads the nodes from *this*
+ * extraction rather than stale entries. Best-effort: a page without
+ * `evaluateJavaScript` simply keeps extractor-derived fields.
+ */
+const TREE_ONLY_RESET_NODE_CACHE_SCRIPT = `(() => {
+  window.midsceneNodeHashCache = new Map();
+  return true;
+})()`;
+
+/**
+ * In-page accessible-name/role/state evidence, following the same
+ * sources as the `vendor/jev-ultrafast` reference (`snapshot.js`):
+ * aria-labelledby, aria-label, associated labels, input value for
+ * button-like inputs, child text, title, placeholder for names; explicit
+ * ARIA roles, tag/type mapping for roles; live DOM properties and ARIA
+ * booleans for state. Runs after extraction, keyed by the extractor's
+ * node hash, and returns only elements with a recognized role so
+ * structural containers stay name-free.
+ */
+const TREE_ONLY_ACCESSIBILITY_SCRIPT_PREFIX = `(() => {
+  const cache = window.midsceneNodeHashCache;
+  if (!(cache instanceof Map)) return null;
+  const supportedRoles = new Set([
+    'button','link','checkbox','radio','switch','tab','menuitem',
+    'menuitemradio','menuitemcheckbox','option','gridcell','combobox',
+    'textbox','searchbox','spinbutton',
+  ]);
+  const textOf = (element) => {
+    const text = element.innerText || element.textContent || '';
+    return text.replace(/\\s+/g, ' ').trim();
+  };
+  const nameOf = (element, seen) => {
+    if (!element || seen.has(element)) return '';
+    seen.add(element);
+    const labelledBy = (element.getAttribute('aria-labelledby') || '')
+      .split(/\\s+/).filter(Boolean)
+      .map((id) => nameOf(element.ownerDocument.getElementById(id), seen))
+      .filter(Boolean).join(' ');
+    if (labelledBy) return labelledBy;
+    const ariaLabel = (element.getAttribute('aria-label') || '').trim();
+    if (ariaLabel) return ariaLabel;
+    const labels = element.labels ? Array.from(element.labels) : [];
+    const labelled = labels.map((label) => nameOf(label, seen))
+      .filter(Boolean).join(' ');
+    if (labelled) return labelled;
+    if (element.tagName === 'INPUT' &&
+        ['button','submit','reset','image'].includes(element.type)) {
+      const value = (element.getAttribute('value') || '').trim();
+      if (value) return value;
+    }
+    if (element.tagName === 'IMG') {
+      const alt = (element.getAttribute('alt') || '').trim();
+      if (alt) return alt;
+    }
+    const text = textOf(element);
+    if (text) return text;
+    const title = (element.getAttribute('title') || '').trim();
+    if (title) return title;
+    const placeholder = (element.getAttribute('placeholder') || '').trim();
+    if (placeholder) return placeholder;
+    return '';
+  };
+  const roleOf = (element) => {
+    const explicit = element.getAttribute('role');
+    if (explicit && supportedRoles.has(explicit)) return explicit;
+    const tag = element.tagName;
+    if (tag === 'BUTTON' || tag === 'SUMMARY') return 'button';
+    if (tag === 'A' && element.hasAttribute('href')) return 'link';
+    if (tag === 'SELECT') return 'combobox';
+    if (tag === 'TEXTAREA' || element.isContentEditable) return 'textbox';
+    if (tag === 'INPUT') {
+      const type = (element.type || '').toLowerCase();
+      if (type === 'checkbox' || type === 'radio') return type;
+      if (['button','submit','reset','image'].includes(type)) return 'button';
+      if (type === 'search') return 'searchbox';
+      if (type === 'number') return 'spinbutton';
+      if (['text','email','url','tel','date','time','datetime-local','month','week']
+        .includes(type)) return 'textbox';
+    }
+    return null;
+  };
+  const boolOf = (value) => value === 'true' ? true : value === 'false' ? false : undefined;
+  const stateOf = (element) => {
+    const state = {};
+    if (element.matches(':disabled') || element.getAttribute('aria-disabled') === 'true') {
+      state.disabled = true;
+    }
+    const ariaChecked = boolOf(element.getAttribute('aria-checked'));
+    if ((element.type === 'checkbox' || element.type === 'radio') &&
+        typeof element.checked === 'boolean') {
+      state.checked = element.checked;
+    } else if (ariaChecked !== undefined) {
+      state.checked = ariaChecked;
+    }
+    if (element.readOnly === true || element.getAttribute('aria-readonly') === 'true') {
+      state.readonly = true;
+    }
+    if (element.required === true || element.getAttribute('aria-required') === 'true') {
+      state.required = true;
+    }
+    const ariaSelected = boolOf(element.getAttribute('aria-selected'));
+    if (element.selected === true) state.selected = true;
+    else if (ariaSelected !== undefined) state.selected = ariaSelected;
+    const ariaExpanded = boolOf(element.getAttribute('aria-expanded'));
+    if (ariaExpanded !== undefined) state.expanded = ariaExpanded;
+    if (element.tagName === 'INPUT' && element.type) state.inputType = element.type;
+    return state;
+  };
+  const ids = `;
+
+function buildAccessibilityScript(ids: readonly string[]): string {
+  return `${TREE_ONLY_ACCESSIBILITY_SCRIPT_PREFIX}${JSON.stringify([...ids])};
+  const out = {};
+  for (const id of ids) {
+    const node = cache.get(id);
+    if (!(node instanceof Element)) continue;
+    const role = roleOf(node);
+    if (!role) continue;
+    const state = stateOf(node);
+    out[id] = {
+      role,
+      name: nameOf(node, new Set()),
+      state,
+    };
+  }
+  return out;
+})()`;
+}
+
+/**
+ * Collect in-page accessibility overrides keyed by extractor node hash.
+ * A missing cache, stale page, or malformed answer is not fatal: the
+ * capture falls back to extractor-derived roles, names, and states.
+ */
+export async function collectTreeOnlyAccessibilityOverrides(
+  page: TreeOnlySnapshotPageLike,
+  ids: readonly string[],
+): Promise<Record<string, TreeOnlyAccessibilityOverride> | undefined> {
+  if (typeof page.evaluateJavaScript !== 'function' || ids.length === 0) {
+    return undefined;
+  }
+  let raw: unknown;
+  try {
+    raw = await page.evaluateJavaScript(buildAccessibilityScript(ids));
+  } catch {
+    return undefined;
+  }
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
+  const result: Record<string, TreeOnlyAccessibilityOverride> = {};
+  for (const [id, value] of Object.entries(raw as Record<string, unknown>)) {
+    if (!value || typeof value !== 'object') continue;
+    const entry = value as {
+      role?: unknown;
+      name?: unknown;
+      state?: unknown;
+    };
+    const override: TreeOnlyAccessibilityOverride = {};
+    if (typeof entry.role === 'string' && entry.role)
+      override.role = entry.role;
+    if (typeof entry.name === 'string' && entry.name.trim()) {
+      override.name = entry.name.trim();
+    }
+    if (entry.state && typeof entry.state === 'object') {
+      const state: Record<string, string | boolean> = {};
+      for (const [key, rawValue] of Object.entries(
+        entry.state as Record<string, unknown>,
+      )) {
+        if (typeof rawValue === 'boolean' || typeof rawValue === 'string') {
+          state[key] = rawValue;
+        }
+      }
+      if (Object.keys(state).length > 0) override.state = state;
+    }
+    result[id] = override;
+  }
+  return Object.keys(result).length > 0 ? result : undefined;
+}
+
+/**
  * Capture one viewport-scoped browser snapshot. Off-screen content is
  * never exposed as candidates: additional content requires scrolling
  * and a fresh capture with a new snapshot identity.
  *
  * Outcomes follow the shared contract: a genuinely blank page is
  * `success-empty`; known gaps make it `partial` (which may carry zero
- * nodes); a thrown evaluate with no usable evidence is `failed` and
+ * nodes); a thrown evaluate with no usable evidence is `failed` and is
  * never relabeled as empty.
  */
 export async function captureTreeOnlyBrowserSnapshot(
@@ -151,6 +336,15 @@ export async function captureTreeOnlyBrowserSnapshot(
     coverageGaps.push(gap);
   }
 
+  if (typeof page.evaluateJavaScript === 'function') {
+    try {
+      await page.evaluateJavaScript(TREE_ONLY_RESET_NODE_CACHE_SCRIPT);
+    } catch {
+      // Best-effort: without a clean cache the accessibility pass below
+      // simply falls back to extractor-derived fields.
+    }
+  }
+
   try {
     const tree = await page.getElementsNodeTree();
     if (!tree) {
@@ -164,6 +358,17 @@ export async function captureTreeOnlyBrowserSnapshot(
         maxNodes: options?.maxNodes,
       });
     }
+    const ids = [
+      ...new Set(
+        treeToList(tree as ElementTreeNode<any>)
+          .map((node) => node?.id)
+          .filter((id): id is string => typeof id === 'string' && id !== ''),
+      ),
+    ];
+    const accessibility = await collectTreeOnlyAccessibilityOverrides(
+      page,
+      ids,
+    );
     return collectTreeOnlyBrowserSnapshot(tree as any, {
       snapshotId: options?.snapshotId,
       capturedAt: options?.capturedAt,
@@ -171,6 +376,7 @@ export async function captureTreeOnlyBrowserSnapshot(
       frameId: options?.frameId,
       coverageGaps,
       maxNodes: options?.maxNodes,
+      accessibility,
     });
   } catch (error) {
     return collectTreeOnlyBrowserSnapshot(null, {

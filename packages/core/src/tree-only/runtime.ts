@@ -31,9 +31,20 @@ export type TreeOnlyAction =
   | 'WAIT'
   | 'DONE'
   | 'BLOCKED';
+export interface TreeOnlyPageContext {
+  url: string;
+  title: string;
+  text: string;
+  /**
+   * Document scroll position and full scrollable height. Lets the
+   * planner decide whether more content exists outside the captured
+   * viewport without hiding the fact that candidates are viewport-scoped.
+   */
+  scroll?: { y: number; height: number };
+}
 export interface TreeOnlyCapture {
   snapshot: TreeOnlyBrowserSnapshot;
-  page: { url: string; title: string; text: string };
+  page: TreeOnlyPageContext;
   validate(
     ref: string,
     action: 'CLICK' | 'TYPE_TEXT' | 'LOCATE',
@@ -73,6 +84,30 @@ export interface TreeOnlyRunOptions {
   };
 }
 
+/** Roles whose primary supported operation is a click. */
+const TREE_ONLY_CLICK_ROLES = new Set([
+  'button',
+  'link',
+  'checkbox',
+  'radio',
+  'switch',
+  'tab',
+  'menuitem',
+  'option',
+]);
+/** Roles that accept text entry (and remain clickable for focus). */
+const TREE_ONLY_TEXT_ENTRY_ROLES = new Set([
+  'textbox',
+  'searchbox',
+  'spinbutton',
+]);
+/**
+ * Input types the tree-only primitives cannot fill or toggle. Offering
+ * TYPE_TEXT on them would be an unsupported control: native file,
+ * range, and color pickers take values through OS/browser UI, not text.
+ */
+const TREE_ONLY_UNSUPPORTED_INPUT_TYPES = new Set(['file', 'range', 'color']);
+
 export function treeOnlySupportedActions(
   node: TreeOnlyBrowserNode,
 ): ('CLICK' | 'TYPE_TEXT')[] {
@@ -83,19 +118,17 @@ export function treeOnlySupportedActions(
     node.state?.disabled === true
   )
     return [];
-  if (node.role === 'textbox' && node.state?.readonly !== true)
+  const inputType =
+    typeof node.state?.inputType === 'string'
+      ? node.state.inputType.toLowerCase()
+      : undefined;
+  if (inputType && TREE_ONLY_UNSUPPORTED_INPUT_TYPES.has(inputType)) return [];
+  if (
+    TREE_ONLY_TEXT_ENTRY_ROLES.has(node.role) &&
+    node.state?.readonly !== true
+  )
     return ['CLICK', 'TYPE_TEXT'];
-  return [
-    'button',
-    'link',
-    'checkbox',
-    'radio',
-    'tab',
-    'menuitem',
-    'option',
-  ].includes(node.role)
-    ? ['CLICK']
-    : [];
+  return TREE_ONLY_CLICK_ROLES.has(node.role) ? ['CLICK'] : [];
 }
 
 export function buildTreeOnlyRequest(

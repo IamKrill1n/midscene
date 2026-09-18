@@ -1,3 +1,5 @@
+import { mkdir, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import { JevEvaluationError, validateJevAnswers } from '@/tree-only/types';
 import type {
   JevAnswer,
@@ -6,6 +8,7 @@ import type {
   JevQuestion,
   JevTransportErrorCategory,
 } from '@/tree-only/types';
+import { getDebug } from '@midscene/shared/logger';
 import { TREE_ONLY_MAX_CHOICE_OPTIONS } from '@midscene/shared/tree-only';
 import type {
   Questions,
@@ -60,6 +63,14 @@ export const JEV_MODEL_ALIASES = ['jev-latest', 'jev-preview'] as const;
  * `systemOne` call; a mock caller in tests must observe it.
  */
 export const JEV_SDK_RETRY_OVERRIDE = { maxRetries: 0 } as const;
+
+/**
+ * Opt-in directory for step-level Jev evidence. Unset in normal runs; when
+ * set, every evaluation writes request/response/error JSON records (T01/T02)
+ * so a failed Interaction Step can be replayed offline. Records contain the
+ * text payload only: no images and no credentials.
+ */
+export const JEV_DUMP_ENV_KEY = 'MIDSCENE_TREE_ONLY_JEVD_DUMP_DIR';
 
 /** Environment keys read for model resolution (values never logged). */
 export const JEV_API_ENV_KEYS = {
@@ -580,6 +591,64 @@ export function toJevTransportError(error: unknown): JevEvaluationError {
   );
 }
 
+const debugJev = getDebug('jev-transport');
+
+export type JevDumpKind = 'request' | 'response' | 'error';
+
+let jevDumpSequence = 0;
+
+function readJevDumpDir(): string | undefined {
+  return readEnvValue(JEV_DUMP_ENV_KEY);
+}
+
+/**
+ * Persist one evidence record for offline replay. Capture is diagnostic: a
+ * filesystem failure is logged and swallowed because it must never change
+ * evaluation behavior.
+ */
+async function writeJevDump(
+  dir: string,
+  record: { kind: JevDumpKind } & Record<string, unknown>,
+): Promise<void> {
+  try {
+    await mkdir(dir, { recursive: true });
+    jevDumpSequence += 1;
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    // The module can be loaded through more than one build (ESM and CJS),
+    // so the in-module counter alone is not globally unique: add the pid and
+    // a random suffix to keep every record a distinct file.
+    const unique = `${process.pid}-${jevDumpSequence}-${Math.random()
+      .toString(36)
+      .slice(2, 8)}`;
+    const name = `${stamp}-${unique}-${record.kind}.json`;
+    await writeFile(join(dir, name), JSON.stringify(record, null, 2), 'utf8');
+  } catch (error) {
+    debugJev(
+      `failed to write dump record to "${dir}": ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+      { console: true },
+    );
+  }
+}
+
+function describeError(error: unknown): Record<string, unknown> {
+  if (error instanceof JevEvaluationError) {
+    return {
+      name: error.name,
+      message: error.message,
+      category: error.category,
+      ...(error.questionId !== undefined
+        ? { questionId: error.questionId }
+        : {}),
+    };
+  }
+  if (error instanceof Error) {
+    return { name: error.name, message: error.message };
+  }
+  return { message: String(error) };
+}
+
 /**
  * Run one typed evaluation through the injected caller. Builds the
  * image-free SystemOne payload, forwards the retry-disabled override, and
@@ -592,7 +661,17 @@ export async function evaluateJev(
   caller: JevSystemOneFn,
   options?: JevCallOptions,
 ): Promise<JevEvaluationResponse> {
+  const dumpDir = readJevDumpDir();
+  const startedAt = Date.now();
   const payload = buildJevSystemOnePayload(request);
+  if (dumpDir) {
+    await writeJevDump(dumpDir, {
+      kind: 'request',
+      recordedAt: new Date().toISOString(),
+      sdkVersion: JEV_SDK_VERSION,
+      request: payload,
+    });
+  }
   let raw: unknown;
   try {
     raw = await caller(payload, {
@@ -603,15 +682,43 @@ export async function evaluateJev(
       retry: { ...JEV_SDK_RETRY_OVERRIDE },
     });
   } catch (error) {
-    throw toJevTransportError(error);
+    const transportError = toJevTransportError(error);
+    if (dumpDir) {
+      await writeJevDump(dumpDir, {
+        kind: 'error',
+        phase: 'call',
+        recordedAt: new Date().toISOString(),
+        durationMs: Date.now() - startedAt,
+        error: describeError(transportError),
+      });
+    }
+    throw transportError;
   }
   try {
-    return parseJevSystemOneResult(request.questions, raw);
-  } catch (error) {
-    if (error instanceof JevEvaluationError) {
-      throw error;
+    const parsed = parseJevSystemOneResult(request.questions, raw);
+    if (dumpDir) {
+      await writeJevDump(dumpDir, {
+        kind: 'response',
+        recordedAt: new Date().toISOString(),
+        durationMs: Date.now() - startedAt,
+        raw,
+        parsed,
+      });
     }
-    throw toJevTransportError(error);
+    return parsed;
+  } catch (error) {
+    const transportError =
+      error instanceof JevEvaluationError ? error : toJevTransportError(error);
+    if (dumpDir) {
+      await writeJevDump(dumpDir, {
+        kind: 'error',
+        phase: 'parse',
+        recordedAt: new Date().toISOString(),
+        durationMs: Date.now() - startedAt,
+        error: describeError(transportError),
+      });
+    }
+    throw transportError;
   }
 }
 

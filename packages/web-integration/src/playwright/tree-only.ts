@@ -37,6 +37,21 @@ export function createPlaywrightTreeOnlyAdapter(
         handles = acquiredHandles;
         const url = page.url();
         const title = await page.title();
+        let scroll: { y: number; height: number } | undefined;
+        try {
+          const measured = await page.evaluate(() => ({
+            y: window.scrollY,
+            height: document.documentElement.scrollHeight,
+          }));
+          if (
+            Number.isFinite(measured?.y) &&
+            Number.isFinite(measured?.height)
+          ) {
+            scroll = { y: measured.y, height: measured.height };
+          }
+        } catch {
+          // Scroll context is advisory; capture stays valid without it.
+        }
         let released = false;
         return {
           snapshot: collected.snapshot,
@@ -47,6 +62,7 @@ export function createPlaywrightTreeOnlyAdapter(
               .map((node) => node.text ?? node.name ?? '')
               .filter(Boolean)
               .join('\n'),
+            ...(scroll ? { scroll } : {}),
           },
           async validate(ref, action) {
             if (

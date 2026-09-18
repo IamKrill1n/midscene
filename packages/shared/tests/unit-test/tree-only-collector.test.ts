@@ -420,6 +420,207 @@ describe('tree-only browser collector', () => {
     expect(serialized).not.toContain('color: red');
   });
 
+  it('applies in-page accessibility overrides for names, roles, and state', () => {
+    const amenity = makeInfo({
+      nodeType: NodeType.BUTTON,
+      attributes: {
+        htmlTagName: '<button>',
+        role: 'checkbox',
+        'aria-checked': 'false',
+        value: 'on',
+      },
+      rect: { left: 10, top: 10, width: 16, height: 16 },
+    });
+    const linkAsText = makeInfo({
+      nodeType: NodeType.TEXT,
+      content: 'Login',
+      attributes: { htmlTagName: '<a>', href: '/login' },
+      rect: { left: 10, top: 40, width: 38, height: 20 },
+    });
+    const tree: ElementTreeNode<ElementInfo> = {
+      node: null,
+      children: [leaf(amenity), leaf(linkAsText)],
+    };
+
+    const result = collectTreeOnlyBrowserSnapshot(tree, {
+      snapshotId: 'snap-a11y',
+      viewport,
+      accessibility: {
+        [amenity.id]: {
+          role: 'checkbox',
+          name: 'WiFi',
+          state: { checked: false, disabled: false },
+        },
+        [linkAsText.id]: { role: 'link', name: 'Login', state: {} },
+      },
+    });
+
+    expect(result.snapshot.nodes[0]).toMatchObject({
+      role: 'checkbox',
+      name: 'WiFi',
+      state: { checked: false, disabled: false },
+    });
+    expect(result.snapshot.nodes[1]).toMatchObject({
+      role: 'link',
+      name: 'Login',
+    });
+  });
+
+  it('never mistakes ARIA false or checkbox values for names or checked state', () => {
+    const amenity = makeInfo({
+      nodeType: NodeType.BUTTON,
+      attributes: {
+        htmlTagName: '<button>',
+        role: 'checkbox',
+        'aria-checked': 'false',
+        value: 'on',
+      },
+    });
+    const disabled = makeInfo({
+      nodeType: NodeType.BUTTON,
+      content: 'Maybe',
+      attributes: { htmlTagName: '<button>', 'aria-disabled': 'false' },
+    });
+    const result = collectTreeOnlyBrowserSnapshot(
+      { node: null, children: [leaf(amenity), leaf(disabled)] },
+      {
+        snapshotId: 'snap-state',
+        viewport,
+        accessibility: { [amenity.id]: { role: 'checkbox' } },
+      },
+    );
+
+    // Without DOM label evidence the submission value "on" is no name.
+    expect(result.snapshot.nodes[0].name).toBeUndefined();
+    expect(result.snapshot.nodes[0].state).toMatchObject({ checked: false });
+    expect(result.snapshot.nodes[0].state?.checked).not.toBe(true);
+    expect(result.snapshot.nodes[1].state).toMatchObject({ disabled: false });
+  });
+
+  it('collapses nested interactive duplicates at identical geometry and label', () => {
+    const rect = { left: 10, top: 10, width: 200, height: 36 };
+    const outer = makeInfo({
+      nodeType: NodeType.A,
+      content: 'View Details',
+      attributes: { htmlTagName: '<a>', href: '/homestay/2' },
+      rect,
+    });
+    const inner = makeInfo({
+      nodeType: NodeType.BUTTON,
+      content: 'View Details',
+      attributes: { htmlTagName: '<button>' },
+      rect,
+    });
+    const nested: ElementTreeNode<ElementInfo> = {
+      node: outer,
+      children: [{ node: inner, children: [] }],
+    };
+    const result = collectTreeOnlyBrowserSnapshot(
+      { node: null, children: [nested] },
+      { snapshotId: 'snap-dedupe', viewport },
+    );
+
+    expect(result.snapshot.nodes).toHaveLength(1);
+    expect(result.snapshot.nodes[0]).toMatchObject({
+      role: 'link',
+      name: 'View Details',
+    });
+
+    const favorite = makeInfo({
+      nodeType: NodeType.BUTTON,
+      content: 'Save',
+      attributes: { htmlTagName: '<button>' },
+      rect,
+    });
+    const distinct = collectTreeOnlyBrowserSnapshot(
+      {
+        node: null,
+        children: [
+          { node: outer, children: [{ node: favorite, children: [] }] },
+        ],
+      },
+      { snapshotId: 'snap-dedupe-distinct', viewport },
+    );
+    expect(distinct.snapshot.nodes).toHaveLength(2);
+    expect(distinct.snapshot.nodes.map((node) => node.role)).toEqual([
+      'link',
+      'button',
+    ]);
+  });
+
+  it('keeps extractor roles when an override promises an unsupported role', () => {
+    const trigger = makeInfo({
+      nodeType: NodeType.BUTTON,
+      content: 'All Stays',
+      attributes: {
+        htmlTagName: '<button>',
+        role: 'combobox',
+        'aria-expanded': 'false',
+      },
+    });
+    const toggle = makeInfo({
+      nodeType: NodeType.BUTTON,
+      content: 'WiFi',
+      attributes: { htmlTagName: '<button>', role: 'switch' },
+    });
+    const result = collectTreeOnlyBrowserSnapshot(
+      { node: null, children: [leaf(trigger), leaf(toggle)] },
+      {
+        snapshotId: 'snap-roles',
+        viewport,
+        accessibility: {
+          [trigger.id]: { role: 'combobox', name: 'All Stays' },
+          [toggle.id]: { role: 'switch', name: 'WiFi' },
+        },
+      },
+    );
+
+    expect(result.snapshot.nodes[0]).toMatchObject({
+      role: 'button',
+      name: 'All Stays',
+      state: { expanded: false },
+    });
+    expect(result.snapshot.nodes[1]).toMatchObject({
+      role: 'switch',
+      name: 'WiFi',
+    });
+  });
+
+  it('maps reset and image submit controls to buttons', () => {
+    const result = collectTreeOnlyBrowserSnapshot(
+      {
+        node: null,
+        children: [
+          leaf(
+            makeInfo({
+              nodeType: NodeType.FORM_ITEM,
+              attributes: {
+                htmlTagName: '<input>',
+                type: 'reset',
+                value: 'Clear',
+              },
+            }),
+          ),
+          leaf(
+            makeInfo({
+              nodeType: NodeType.FORM_ITEM,
+              attributes: {
+                htmlTagName: '<input>',
+                type: 'image',
+                alt: 'Search',
+              },
+            }),
+          ),
+        ],
+      },
+      { snapshotId: 'snap-input-types', viewport },
+    );
+    expect(result.snapshot.nodes.map((node) => node.role)).toEqual([
+      'button',
+      'button',
+    ]);
+  });
+
   it('rejects invalid viewport and budget options', () => {
     expect(() =>
       collectTreeOnlyBrowserSnapshot(

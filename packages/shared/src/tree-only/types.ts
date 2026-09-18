@@ -93,6 +93,20 @@ export function isZeroAreaRect(rect: Rect): boolean {
   return rect.width === 0 || rect.height === 0;
 }
 
+/**
+ * DOM-derived accessibility evidence for one collected node, computed
+ * in-page from the live element. Optional: captures without a live DOM
+ * fall back to extractor-derived fields. `name` follows accessible-name
+ * resolution (aria-labelledby, aria-label, labels, content, title,
+ * placeholder); `role` uses explicit ARIA roles when they describe a
+ * supported control; `state` carries truthful native/ARIA booleans.
+ */
+export interface TreeOnlyAccessibilityOverride {
+  role?: string;
+  name?: string;
+  state?: Record<string, string | boolean>;
+}
+
 /** Browser semantic candidate node (Playwright-style evidence). */
 export interface TreeOnlyBrowserNode {
   /** Snapshot-scoped reference; resolves only via the owning snapshot. */
