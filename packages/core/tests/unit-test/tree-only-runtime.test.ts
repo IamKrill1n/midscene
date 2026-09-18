@@ -1,4 +1,7 @@
-import type { TreeOnlyPlannerDecision } from '@/tree-only/planner';
+import type {
+  TreeOnlyPlannerDecision,
+  TreeOnlyPlannerInput,
+} from '@/tree-only/planner';
 import {
   type TreeOnlyCapture,
   type TreeOnlyRunOptions,
@@ -13,6 +16,20 @@ import {
 import { describe, expect, it, rs } from '@rstest/core';
 
 const rect = { left: 10, top: 10, width: 100, height: 30 };
+function validated(ref: string) {
+  const name = ref === 'r2' ? 'Name' : 'Submit';
+  return {
+    element: {
+      center: [60, 25] as [number, number],
+      rect,
+      description: name,
+    },
+    observation: {
+      role: ref === 'r2' ? 'textbox' : 'button',
+      name,
+    },
+  };
+}
 function capture(): TreeOnlyCapture {
   return {
     snapshot: {
@@ -32,11 +49,7 @@ function capture(): TreeOnlyCapture {
       ],
     },
     page: { url: 'https://fixture.test', title: 'Form', text: 'Name Submit' },
-    validate: rs.fn(async () => ({
-      center: [60, 25] as [number, number],
-      rect,
-      description: 'field',
-    })),
+    validate: rs.fn(async (ref: string) => validated(ref)),
     release: rs.fn(async () => {}),
   };
 }
@@ -74,8 +87,8 @@ function setup() {
     maxSteps: 5,
     evaluate: rs.fn(async (request) => answer(request, 'DONE')),
     typeText: rs.fn(async () => 'Alice'),
-    execute: rs.fn(async (plan, before) => {
-      await before(plan.param);
+    execute: rs.fn(async (plan, beforeDispatch) => {
+      await beforeDispatch(plan.param);
     }),
   };
   return { options, captured };
@@ -126,9 +139,9 @@ describe('tree-only Jev actions', () => {
         operation: 'TYPE_TEXT',
         target: 'Name',
         value: 'Alice',
-        outcome: 'executed',
+        outcome: 'confirmed',
       },
-      { operation: 'CLICK', target: 'Submit', outcome: 'executed' },
+      { operation: 'CLICK', target: 'Submit', outcome: 'confirmed' },
     ]);
     expect(captured.validate).toHaveBeenCalledTimes(4);
     expect(captured.release).toHaveBeenCalled();
@@ -173,22 +186,116 @@ describe('tree-only Jev actions', () => {
     captured.validate = async () => {
       if (++calls === 1)
         throw new TreeOnlyOperationError('stale', 'stale-target');
-      return { center: [60, 25], rect, description: 'Submit' };
+      return validated('r1');
     };
     await runTreeOnly(options);
     expect(options.browser.capture).toHaveBeenCalledTimes(2);
     expect(options.execute).toHaveBeenCalledTimes(1);
   });
-  it('never repeats a dispatched mutation after execution failure', async () => {
+  it('inspects an uncertain dispatched mutation once and never repeats it', async () => {
     const { options } = setup();
     options.evaluate = async (request) => answer(request);
-    options.execute = rs.fn(async (plan, before) => {
-      await before(plan.param);
+    options.execute = rs.fn(async (plan, beforeDispatch) => {
+      await beforeDispatch(plan.param);
       throw new Error('input outcome unknown');
     });
-    await expect(runTreeOnly(options)).rejects.toThrow('input outcome unknown');
+    let error: unknown;
+    try {
+      await runTreeOnly(options);
+    } catch (caught) {
+      error = caught;
+    }
+    expect((error as TreeOnlyOperationError).category).toBe(
+      'uncertain-delivery',
+    );
+    expect((error as Error).message).toContain('input outcome unknown');
+    expect((error as Error).message).toContain('fresh evidence');
+    expect(options.execute).toHaveBeenCalledTimes(1);
+    expect(options.browser.capture).toHaveBeenCalledTimes(2);
+  });
+  it('reports inspected meaning by role and name instead of reusing a ref', async () => {
+    const { options, captured } = setup();
+    options.evaluate = async (request) => answer(request);
+    options.execute = rs.fn(async (plan, beforeDispatch) => {
+      await beforeDispatch(plan.param);
+      throw new Error('input outcome unknown');
+    });
+    let calls = 0;
+    options.browser.capture = rs.fn(async () => {
+      calls += 1;
+      if (calls === 1) return captured;
+      return {
+        ...captured,
+        snapshot: {
+          ...captured.snapshot,
+          base: { ...captured.snapshot.base, snapshotId: 's2' },
+          nodes: [{ ref: 'r1', role: 'button', name: 'Delete', bounds: rect }],
+        },
+        release: rs.fn(async () => {}),
+      } as TreeOnlyCapture;
+    });
+    let error: unknown;
+    try {
+      await runTreeOnly(options);
+    } catch (caught) {
+      error = caught;
+    }
+    expect((error as Error).message).toContain('no longer present');
+    expect((error as Error).message).toContain('Delete');
+    expect((error as Error).message).toContain('now denotes');
+  });
+  it('fails a dispatched permanent failure as a confirmed incorrect interaction', async () => {
+    const { options } = setup();
+    options.evaluate = async (request) => answer(request);
+    options.execute = rs.fn(async (plan, beforeDispatch) => {
+      await beforeDispatch(plan.param);
+      throw new TreeOnlyOperationError(
+        'element became obstructed',
+        'obstruction',
+      );
+    });
+    let error: unknown;
+    try {
+      await runTreeOnly(options);
+    } catch (caught) {
+      error = caught;
+    }
+    expect(error).toBeInstanceOf(TreeOnlyOperationError);
+    expect((error as TreeOnlyOperationError).category).toBe('obstruction');
+    expect((error as Error).message).toContain('obstructed');
     expect(options.execute).toHaveBeenCalledTimes(1);
     expect(options.browser.capture).toHaveBeenCalledTimes(1);
+  });
+  it('recovers a freshness failure raised by final dispatch validation', async () => {
+    const { options, captured } = setup();
+    options.direct = { type: 'Tap', param: {} };
+    options.evaluate = async (request) => answer(request);
+    let calls = 0;
+    captured.validate = async (ref: string) => {
+      calls += 1;
+      if (calls === 2)
+        throw new TreeOnlyOperationError(
+          'target changed at dispatch',
+          'stale-target',
+        );
+      return validated(ref);
+    };
+    await runTreeOnly(options);
+    expect(options.browser.capture).toHaveBeenCalledTimes(2);
+    expect(options.execute).toHaveBeenCalledTimes(2);
+  });
+  it('refuses a target whose meaning changed even though the ref still resolves', async () => {
+    const { options, captured } = setup();
+    options.direct = { type: 'Tap', param: {} };
+    options.evaluate = async (request) => answer(request);
+    captured.validate = async () => ({
+      element: { center: [60, 25], rect, description: 'Delete' },
+      observation: { role: 'button', name: 'Delete' },
+    });
+    await expect(runTreeOnly(options)).rejects.toThrow(
+      /changed after selection/,
+    );
+    expect(options.execute).not.toHaveBeenCalled();
   });
   it('stops after the initial attempt and two service recoveries', async () => {
     const { options } = setup();
@@ -347,6 +454,84 @@ describe('tree-only planned operations', () => {
     expect(attempts).toBe(2);
     expect(options.browser.capture).toHaveBeenCalledTimes(2);
     expect(captured.release).toHaveBeenCalled();
+  });
+
+  it('feeds revised failure context and fresh evidence into planner recovery', async () => {
+    const { options } = setup();
+    const inputs: TreeOnlyPlannerInput[] = [];
+    let attempts = 0;
+    options.plan = rs.fn(async (input: TreeOnlyPlannerInput) => {
+      inputs.push(input);
+      attempts += 1;
+      if (attempts === 1) throw new Error('planner service unavailable');
+      return { operation: 'DONE' as const };
+    });
+    await runTreeOnly(options);
+    expect(inputs).toHaveLength(2);
+    expect(inputs[1].recoveryContext).toContain('planner service unavailable');
+    expect(inputs[1].recoveryContext).toContain('fresh evidence');
+    expect(inputs[1].state.page.title).toBe('Form');
+  });
+
+  it('revises planner context with the changed target meaning', async () => {
+    const { options, captured } = setup();
+    const inputs: TreeOnlyPlannerInput[] = [];
+    const decisions: TreeOnlyPlannerDecision[] = [
+      { operation: 'CLICK', instruction: 'the Submit button' },
+      { operation: 'CLICK', instruction: 'the Submit button' },
+      { operation: 'DONE' },
+    ];
+    options.plan = rs.fn(async (input: TreeOnlyPlannerInput) => {
+      inputs.push(input);
+      return decisions.shift()!;
+    });
+    options.evaluate = async (request) => answer(request, 'CLICK', 'r1');
+    let calls = 0;
+    captured.validate = async (ref: string) => {
+      calls += 1;
+      if (calls === 1)
+        return {
+          element: { center: [60, 25], rect, description: 'Delete' },
+          observation: { role: 'button', name: 'Delete' },
+        };
+      return validated(ref);
+    };
+    await runTreeOnly(options);
+    expect(inputs).toHaveLength(3);
+    expect(inputs[1].recoveryContext).toContain('changed after selection');
+    expect(inputs[1].recoveryContext).toContain('Delete');
+    expect(options.execute).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not accept a later planner completion after a dispatched failure', async () => {
+    const { options } = plannedSetup([
+      { operation: 'CLICK', instruction: 'the Submit button' },
+      { operation: 'DONE' },
+    ]);
+    options.evaluate = async (request) => answer(request, 'CLICK', 'r1');
+    options.execute = rs.fn(async (plan, beforeDispatch) => {
+      await beforeDispatch(plan.param);
+      throw new Error('click outcome unknown');
+    });
+    await expect(runTreeOnly(options)).rejects.toThrow('click outcome unknown');
+    expect(options.plan).toHaveBeenCalledTimes(1);
+    expect(options.execute).toHaveBeenCalledTimes(1);
+  });
+
+  it('fails a dispatched permanent action failure without replanning', async () => {
+    const { options } = plannedSetup([
+      { operation: 'CLICK', instruction: 'the Submit button' },
+      { operation: 'DONE' },
+    ]);
+    options.evaluate = async (request) => answer(request, 'CLICK', 'r1');
+    options.execute = rs.fn(async (plan, beforeDispatch) => {
+      await beforeDispatch(plan.param);
+      throw new TreeOnlyOperationError('target vanished mid-action', 'missing');
+    });
+    await expect(runTreeOnly(options)).rejects.toThrow('target vanished');
+    expect(options.plan).toHaveBeenCalledTimes(1);
+    expect(options.execute).toHaveBeenCalledTimes(1);
+    expect(options.browser.capture).toHaveBeenCalledTimes(1);
   });
 
   it('fails a blocked plan permanently without asking Jev', async () => {

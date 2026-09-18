@@ -5,6 +5,14 @@ import type {
 } from '@midscene/shared/tree-only';
 import { TREE_ONLY_MAX_CONCRETE_CANDIDATES } from '@midscene/shared/tree-only';
 import {
+  type TreeOnlyTargetObservation,
+  type TreeOnlyValidatedTarget,
+  assertTreeOnlyTargetMeaningUnchanged,
+  describeTreeOnlyTarget,
+  treeOnlyTargetMeaningMatches,
+} from './freshness';
+import {
+  type TreeOnlyOperationState,
   attachTreeOnlySnapshot,
   createTreeOnlyOperationState,
   finishTreeOnlyOperation,
@@ -15,6 +23,11 @@ import {
   throwIfTreeOnlyCancelled,
   throwIfTreeOnlyDeadlineExceeded,
 } from './lifecycle';
+import {
+  type TreeOnlyPreExecutionFailure,
+  type TreeOnlyUncertainInspection,
+  classifyTreeOnlyStepOutcome,
+} from './outcomes';
 import {
   type TreeOnlyPlanFn,
   type TreeOnlyPlannerDecision,
@@ -28,6 +41,11 @@ import {
   type TreeOnlyOperationContext,
   TreeOnlyOperationError,
 } from './types';
+
+export type {
+  TreeOnlyTargetObservation,
+  TreeOnlyValidatedTarget,
+} from './freshness';
 
 export type TreeOnlyAction =
   | 'CLICK'
@@ -55,7 +73,7 @@ export interface TreeOnlyCapture {
   validate(
     ref: string,
     action: 'CLICK' | 'TYPE_TEXT' | 'LOCATE',
-  ): Promise<LocateResultElement>;
+  ): Promise<TreeOnlyValidatedTarget>;
   release(): Promise<void>;
 }
 export interface TreeOnlyBrowserAdapter {
@@ -65,7 +83,13 @@ export interface TreeOnlyHistoryEntry {
   operation: string;
   target?: string;
   value?: string;
-  outcome: 'dispatched' | 'executed' | 'uncertain';
+  /**
+   * `dispatched` is the in-flight marker between physical input and its
+   * confirmed result. Planner-visible history only carries the settled
+   * outcome: `confirmed` (the action completed) or `uncertain` (its effect
+   * could not be established).
+   */
+  outcome: 'dispatched' | 'confirmed' | 'uncertain';
 }
 export interface TreeOnlyHelperInput {
   goal: string;
@@ -309,13 +333,155 @@ function plannedGoal(
   return parts.join('\n');
 }
 
-interface TreeOnlyStepDecision {
-  operation: TreeOnlyAction;
-  target?: string;
-  node?: TreeOnlyBrowserNode;
-  value?: string;
-  located?: LocateResultElement;
-  directParam?: Record<string, any>;
+/** Per-step result after the decision and, when requested, execution. */
+type TreeOnlyStepResult =
+  | { kind: 'done' }
+  | { kind: 'located'; element: LocateResultElement }
+  | { kind: 'waited' }
+  | { kind: 'executed' };
+
+/**
+ * Validate one selected reference and require the live element to still mean
+ * what the snapshot recorded. A ref that resolves is not enough: a changed
+ * role, name, text, or state means physical input would run against a
+ * different control than the planner and Jev selected.
+ */
+async function validateTreeOnlyTarget(
+  capture: TreeOnlyCapture,
+  node: TreeOnlyBrowserNode,
+  operation: 'CLICK' | 'TYPE_TEXT' | 'LOCATE',
+): Promise<LocateResultElement> {
+  const validated = await capture.validate(node.ref, operation);
+  assertTreeOnlyTargetMeaningUnchanged(node, validated.observation);
+  return validated.element;
+}
+
+/**
+ * Revised action/operation-local context for the next planner turn. It stays
+ * local to this operation (agent-wide context is never mutated), keeps any
+ * caller-supplied recovery context as a prefix, and carries the selected
+ * target plus the page the fresh evidence will come from.
+ */
+function treeOnlyRecoveryContext(
+  failure: TreeOnlyPreExecutionFailure,
+  evidence: { node?: TreeOnlyBrowserNode; page?: TreeOnlyCapture['page'] },
+  suppliedContext?: string,
+): string {
+  const parts: string[] = [];
+  const supplied = suppliedContext?.trim();
+  if (supplied) parts.push(supplied);
+  if (failure.category === 'no-match') {
+    parts.push(
+      `The previous interaction did not run because no observed target matched. ${failure.reason}`,
+    );
+  } else {
+    parts.push(
+      `The previous interaction did not run before dispatch (${failure.category}): ${failure.reason}.`,
+    );
+  }
+  if (failure.category === 'stale-target' && evidence.node) {
+    parts.push(
+      `The selected target was ${describeTreeOnlyTarget(evidence.node)}.`,
+    );
+  }
+  if (evidence.page) {
+    parts.push(
+      `Last observed page: ${evidence.page.url} (${evidence.page.title}).`,
+    );
+  }
+  parts.push('Re-plan from the fresh evidence.');
+  return parts.join(' ');
+}
+
+/**
+ * Inspect an uncertain dispatched interaction from fresh evidence without
+ * dispatching anything. The runner records what the page shows now instead
+ * of repeating the action: only evidence that the action did not occur may
+ * justify a repeat, and this inspection never manufactures that evidence.
+ * Targets are matched by role and accessible name, never by ref, because
+ * refs are per-capture counters.
+ */
+async function inspectTreeOnlyUncertainExecution(
+  options: TreeOnlyRunOptions,
+  failed: TreeOnlyCapture,
+  node: TreeOnlyBrowserNode | undefined,
+): Promise<TreeOnlyUncertainInspection> {
+  const inspection: TreeOnlyUncertainInspection = {
+    captured: false,
+  };
+  try {
+    await failed.release();
+    const fresh = await options.browser.capture();
+    try {
+      const present = node
+        ? fresh.snapshot.nodes.find((candidate) =>
+            treeOnlyTargetMeaningMatches(node, candidate),
+          )
+        : undefined;
+      const rebound =
+        node && !present
+          ? fresh.snapshot.nodes.find((candidate) => candidate.ref === node.ref)
+          : undefined;
+      const pageChanged =
+        fresh.page.url !== failed.page.url ||
+        fresh.page.title !== failed.page.title;
+      inspection.captured = true;
+      let target: string;
+      if (!node) {
+        target = 'no target was selected';
+      } else if (present) {
+        target = `target ${describeTreeOnlyTarget(node)} is still present${present.ref === node.ref ? '' : ` at ref ${present.ref}`}`;
+      } else {
+        target = `target ${describeTreeOnlyTarget(node)} is no longer present`;
+      }
+      const reboundNote = rebound
+        ? `; ref ${node!.ref} now denotes ${describeTreeOnlyTarget(rebound)}`
+        : '';
+      inspection.detail = `fresh evidence shows ${target}${reboundNote} and the page ${
+        pageChanged ? 'changed' : 'did not change'
+      }`;
+    } finally {
+      await fresh.release();
+    }
+  } catch (error) {
+    inspection.error = error instanceof Error ? error.message : String(error);
+  }
+  return inspection;
+}
+
+function describeUncertainInspection(
+  inspection: TreeOnlyUncertainInspection,
+): string {
+  if (inspection.captured)
+    return `Inspected ${inspection.detail} before stopping.`;
+  if (inspection.error)
+    return `The fresh-evidence inspection failed too (${inspection.error}).`;
+  return 'The outcome could not be established from fresh evidence.';
+}
+
+async function waitForTreeOnlyPoll(
+  state: TreeOnlyOperationState,
+): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    const signal = state.context.abortSignal;
+    const done = () => {
+      signal?.removeEventListener('abort', aborted);
+      resolve();
+    };
+    const timer = setTimeout(done, 500);
+    const aborted = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', aborted);
+      reject(
+        new TreeOnlyOperationError(
+          'Tree-only operation cancelled',
+          'cancelled',
+        ),
+      );
+    };
+    signal?.addEventListener('abort', aborted, { once: true });
+    if (signal?.aborted) aborted();
+  });
 }
 
 export async function runTreeOnly(
@@ -329,225 +495,247 @@ export async function runTreeOnly(
     );
   const state = createTreeOnlyOperationState(options.context);
   const history: TreeOnlyHistoryEntry[] = [];
+  const suppliedRecoveryContext = options.context.recoveryContext;
+  let recoveryContext = suppliedRecoveryContext;
   let capture: TreeOnlyCapture | undefined;
   let previousDecision = '';
   let repeatedDecisions = 0;
+  const recordDecision = (fingerprint: string, repeats: boolean) => {
+    previousDecision = fingerprint;
+    repeatedDecisions = repeats ? repeatedDecisions + 1 : 0;
+  };
   try {
     for (let step = 0; step < options.maxSteps; step++) {
-      const { value: decision } =
-        await runTreeOnlyWithRecovery<TreeOnlyStepDecision>(state, async () => {
-          await capture?.release();
-          capture = await options.browser.capture();
-          attachTreeOnlySnapshot(state, capture.snapshot.base.snapshotId);
+      const { value: result } =
+        await runTreeOnlyWithRecovery<TreeOnlyStepResult>(state, async () => {
+          let activeCapture: TreeOnlyCapture | undefined;
+          let selectedNode: TreeOnlyBrowserNode | undefined;
+          let attemptedOperation: TreeOnlyAction | undefined;
+          let dispatched = false;
+          try {
+            await capture?.release();
+            capture = await options.browser.capture();
+            const current = capture;
+            activeCapture = current;
+            attachTreeOnlySnapshot(state, current.snapshot.base.snapshotId);
 
-          let planned: TreeOnlyPlannerDecision | undefined;
-          if (options.plan) {
-            // Never plan from failed or budget-truncated evidence: a planner
-            // completion decision there would claim success on partial input.
-            if (capture.snapshot.base.status === 'failed')
-              throw new TreeOnlyOperationError(
-                'Browser tree capture failed',
-                'service-failure',
-              );
-            if (capture.snapshot.base.delivery.truncated)
-              throw new TreeOnlyOperationError(
-                'Tree context exceeds the capture budget; narrow the page before retrying',
-                'unsupported-input',
-              );
-            planned = await options.plan({
-              instruction: options.context.instruction,
-              actionContext: options.context.actionContext,
-              recoveryContext: options.context.recoveryContext,
-              state: buildTreeOnlyEvidence(capture, history),
-            });
+            let planned: TreeOnlyPlannerDecision | undefined;
+            if (options.plan) {
+              // Never plan from failed or budget-truncated evidence: a planner
+              // completion decision there would claim success on partial input.
+              if (current.snapshot.base.status === 'failed')
+                throw new TreeOnlyOperationError(
+                  'Browser tree capture failed',
+                  'service-failure',
+                );
+              if (current.snapshot.base.delivery.truncated)
+                throw new TreeOnlyOperationError(
+                  'Tree context exceeds the capture budget; narrow the page before retrying',
+                  'unsupported-input',
+                );
+              planned = await options.plan({
+                instruction: options.context.instruction,
+                actionContext: options.context.actionContext,
+                recoveryContext,
+                state: buildTreeOnlyEvidence(current, history),
+              });
+              throwIfTreeOnlyCancelled(state.context);
+              throwIfTreeOnlyDeadlineExceeded(state);
+              if (planned.operation === 'BLOCKED')
+                throw new TreeOnlyOperationError(
+                  planned.message
+                    ? `Tree-only planner cannot complete this goal: ${planned.message}`
+                    : 'Tree-only planner cannot complete this goal with supported actions',
+                  'unsupported-operation',
+                );
+            }
+            if (planned?.operation === 'DONE') return { kind: 'done' };
+            const plannedAction =
+              planned && planned.operation !== 'BLOCKED' ? planned : undefined;
+            const resolvedDirect = options.direct
+              ? options.direct
+              : plannedAction
+                ? treeOnlyPlannerDirect(plannedAction)
+                : undefined;
+            const goal = plannedAction
+              ? plannedGoal(
+                  plannedAction,
+                  options.context.actionContext,
+                  recoveryContext,
+                  options.context.instruction,
+                )
+              : options.context.instruction;
+            const request = buildTreeOnlyRequest(
+              current,
+              goal,
+              history,
+              options.model,
+              resolvedDirect,
+            );
+            const response = request.questions.length
+              ? await options.evaluate(request)
+              : { answers: [], model: options.model };
+            options.record?.(response, request);
             throwIfTreeOnlyCancelled(state.context);
             throwIfTreeOnlyDeadlineExceeded(state);
-            if (planned.operation === 'BLOCKED')
+            const operation: TreeOnlyAction = resolvedDirect
+              ? operationFromDirect(resolvedDirect)
+              : (selected(response, request, 'operation') as TreeOnlyAction);
+            attemptedOperation = operation;
+            if (operation === 'DONE') return { kind: 'done' };
+            if (operation === 'BLOCKED')
               throw new TreeOnlyOperationError(
-                planned.message
-                  ? `Tree-only planner cannot complete this goal: ${planned.message}`
-                  : 'Tree-only planner cannot complete this goal with supported actions',
+                'Jev cannot complete this goal with supported tree-only actions',
                 'unsupported-operation',
               );
-          }
-          if (planned?.operation === 'DONE') return { operation: 'DONE' };
-          const plannedAction =
-            planned && planned.operation !== 'BLOCKED' ? planned : undefined;
-          const resolvedDirect = options.direct
-            ? options.direct
-            : plannedAction
-              ? treeOnlyPlannerDirect(plannedAction)
+            const target = ['CLICK', 'TYPE_TEXT', 'LOCATE'].includes(operation)
+              ? selected(response, request, `target_${operation}`)
               : undefined;
-          const goal = plannedAction
-            ? plannedGoal(
-                plannedAction,
-                options.context.actionContext,
-                options.context.recoveryContext,
-                options.context.instruction,
-              )
-            : options.context.instruction;
-          const request = buildTreeOnlyRequest(
-            capture,
-            goal,
-            history,
-            options.model,
-            resolvedDirect,
-          );
-          const response = request.questions.length
-            ? await options.evaluate(request)
-            : { answers: [], model: options.model };
-          options.record?.(response, request);
-          throwIfTreeOnlyCancelled(state.context);
-          throwIfTreeOnlyDeadlineExceeded(state);
-          const operation: TreeOnlyAction = resolvedDirect
-            ? operationFromDirect(resolvedDirect)
-            : (selected(response, request, 'operation') as TreeOnlyAction);
-          const target = ['CLICK', 'TYPE_TEXT', 'LOCATE'].includes(operation)
-            ? selected(response, request, `target_${operation}`)
-            : undefined;
-          if (target === 'no-match')
-            throw new TreeOnlyOperationError(
-              'Jev found no matching visible target',
-              'unsupported-input',
-            );
-          const node = target
-            ? capture.snapshot.nodes.find((node) => node.ref === target)
-            : undefined;
-          if (target && !node)
-            throw new TreeOnlyOperationError(
-              'Jev selected an unknown target',
-              'malformed',
-            );
-          let value = resolvedDirect?.param.value;
-          if (
-            operation === 'TYPE_TEXT' &&
-            typeof value !== 'string' &&
-            !options.direct
-          )
-            value = await options.typeText({
-              goal,
-              field: node!,
-              page: capture.page,
-              recent_actions: history.slice(-10),
-            });
-          if (operation === 'TYPE_TEXT' && typeof value !== 'string')
-            throw new TreeOnlyOperationError(
-              'Typing helper must return a string',
-              'malformed',
-            );
-          const located = target
-            ? await capture.validate(
-                target,
-                operation as 'CLICK' | 'TYPE_TEXT' | 'LOCATE',
-              )
-            : undefined;
-          return {
-            operation,
-            target,
-            node,
-            value,
-            located,
-            directParam: resolvedDirect?.param,
-          };
-        });
-      const { operation, target, node, value, located, directParam } = decision;
-      const fingerprint = JSON.stringify({
-        page: capture?.page,
-        nodes: capture?.snapshot.nodes,
-        operation,
-        target,
-        value,
-      });
-      repeatedDecisions =
-        fingerprint === previousDecision ? repeatedDecisions + 1 : 0;
-      previousDecision = fingerprint;
-      if (repeatedDecisions >= 2)
-        throw new TreeOnlyOperationError(
-          'Tree-only operation made no progress after repeated identical decisions',
-          'budget-exhausted',
-        );
-      if (operation === 'DONE') return;
-      if (operation === 'BLOCKED')
-        throw new TreeOnlyOperationError(
-          'Jev cannot complete this goal with supported tree-only actions',
-          'unsupported-operation',
-        );
-      if (operation === 'LOCATE') return located;
-      if (operation === 'WAIT') {
-        await new Promise<void>((resolve, reject) => {
-          const signal = state.context.abortSignal;
-          const done = () => {
-            signal?.removeEventListener('abort', aborted);
-            resolve();
-          };
-          const timer = setTimeout(done, 500);
-          const aborted = () => {
-            clearTimeout(timer);
-            signal?.removeEventListener('abort', aborted);
-            reject(
-              new TreeOnlyOperationError(
-                'Tree-only operation cancelled',
-                'cancelled',
-              ),
-            );
-          };
-          signal?.addEventListener('abort', aborted, { once: true });
-          if (signal?.aborted) aborted();
-        });
-        history.push({ operation, outcome: 'executed' });
-        continue;
-      }
-      const type =
-        operation === 'CLICK'
-          ? 'Tap'
-          : operation === 'TYPE_TEXT'
-            ? 'Input'
-            : 'Scroll';
-      const param: Record<string, any> = directParam
-        ? { ...directParam }
-        : type === 'Scroll'
-          ? {
-              direction: operation === 'SCROLL_UP' ? 'up' : 'down',
-              scrollType: 'singleAction',
-            }
-          : type === 'Input'
-            ? { value }
-            : {};
-      if (type === 'Input' && param.value === undefined) param.value = value;
-      if (located) param.locate = located;
-      else param.locate = undefined;
-      const entry: TreeOnlyHistoryEntry = {
-        operation,
-        target: node?.name ?? node?.text,
-        ...(type === 'Input' ? { value } : {}),
-        outcome: 'dispatched',
-      };
-      let dispatched = false;
-      try {
-        await options.execute(
-          { type, param, thought: '' },
-          async (parsedParam) => {
-            // This callback runs after action hooks/delays, immediately before input.
-            if (target)
-              parsedParam.locate = await capture!.validate(
-                target,
-                operation as 'CLICK' | 'TYPE_TEXT',
+            if (target === 'no-match')
+              throw new TreeOnlyOperationError(
+                'Jev found no matching visible target',
+                'unsupported-input',
               );
-            recordTreeOnlyDispatch(state);
-            dispatched = true;
-            history.push(entry);
-          },
-        );
-        entry.outcome = 'executed';
-        recordTreeOnlySuccessStep(state);
-      } catch (error) {
-        if (dispatched) {
-          entry.outcome = 'uncertain';
-          recordTreeOnlyUncertainDelivery(state);
-        }
-        throw error;
-      }
-      if (options.direct) return;
+            const node = target
+              ? current.snapshot.nodes.find(
+                  (candidate) => candidate.ref === target,
+                )
+              : undefined;
+            if (target && !node)
+              throw new TreeOnlyOperationError(
+                'Jev selected an unknown target',
+                'malformed',
+              );
+            selectedNode = node;
+            let value = resolvedDirect?.param.value;
+            if (
+              operation === 'TYPE_TEXT' &&
+              typeof value !== 'string' &&
+              !options.direct
+            )
+              value = await options.typeText({
+                goal,
+                field: node!,
+                page: current.page,
+                recent_actions: history.slice(-10),
+              });
+            if (operation === 'TYPE_TEXT' && typeof value !== 'string')
+              throw new TreeOnlyOperationError(
+                'Typing helper must return a string',
+                'malformed',
+              );
+            const located =
+              target && node
+                ? await validateTreeOnlyTarget(
+                    current,
+                    node,
+                    operation as 'CLICK' | 'TYPE_TEXT' | 'LOCATE',
+                  )
+                : undefined;
+
+            const fingerprint = JSON.stringify({
+              page: current.page,
+              nodes: current.snapshot.nodes,
+              operation,
+              target,
+              value,
+            });
+            const repeats = fingerprint === previousDecision;
+            if (repeats && repeatedDecisions >= 1)
+              throw new TreeOnlyOperationError(
+                'Tree-only operation made no progress after repeated identical decisions',
+                'budget-exhausted',
+              );
+
+            if (operation === 'LOCATE')
+              return { kind: 'located', element: located! };
+            if (operation === 'WAIT') {
+              await waitForTreeOnlyPoll(state);
+              history.push({ operation, outcome: 'confirmed' });
+              recordDecision(fingerprint, repeats);
+              return { kind: 'waited' };
+            }
+            const type =
+              operation === 'CLICK'
+                ? 'Tap'
+                : operation === 'TYPE_TEXT'
+                  ? 'Input'
+                  : 'Scroll';
+            const param: Record<string, any> = resolvedDirect?.param
+              ? { ...resolvedDirect.param }
+              : type === 'Scroll'
+                ? {
+                    direction: operation === 'SCROLL_UP' ? 'up' : 'down',
+                    scrollType: 'singleAction',
+                  }
+                : type === 'Input'
+                  ? { value }
+                  : {};
+            if (type === 'Input' && param.value === undefined)
+              param.value = value;
+            param.locate = located;
+            const entry: TreeOnlyHistoryEntry = {
+              operation,
+              target: node?.name ?? node?.text,
+              ...(type === 'Input' ? { value } : {}),
+              outcome: 'dispatched',
+            };
+            try {
+              await options.execute(
+                { type, param, thought: '' },
+                async (parsedParam) => {
+                  // This callback runs after action hooks/delays, immediately before input.
+                  if (target && node)
+                    parsedParam.locate = await validateTreeOnlyTarget(
+                      current,
+                      node,
+                      operation as 'CLICK' | 'TYPE_TEXT',
+                    );
+                  recordTreeOnlyDispatch(state);
+                  dispatched = true;
+                  history.push(entry);
+                },
+              );
+              entry.outcome = 'confirmed';
+              recordTreeOnlySuccessStep(state);
+            } catch (error) {
+              if (dispatched) {
+                entry.outcome = 'uncertain';
+                recordTreeOnlyUncertainDelivery(state);
+              }
+              throw error;
+            }
+            recordDecision(fingerprint, repeats);
+            return { kind: 'executed' };
+          } catch (error) {
+            const outcome = classifyTreeOnlyStepOutcome(error, { dispatched });
+            if (outcome.kind === 'pre-execution-failure') {
+              recoveryContext = treeOnlyRecoveryContext(
+                outcome,
+                { node: selectedNode, page: activeCapture?.page },
+                suppliedRecoveryContext,
+              );
+            }
+            if (outcome.kind === 'uncertain-execution' && activeCapture) {
+              const inspection = await inspectTreeOnlyUncertainExecution(
+                options,
+                activeCapture,
+                selectedNode,
+              );
+              throw new TreeOnlyOperationError(
+                `Dispatching the ${attemptedOperation ?? 'requested'} interaction failed with an unknown outcome: ${outcome.reason}. ${describeUncertainInspection(
+                  inspection,
+                )}`,
+                'uncertain-delivery',
+                { operationId: state.context.operationId },
+              );
+            }
+            throw error;
+          }
+        });
+      if (result.kind === 'done') return;
+      if (result.kind === 'located') return result.element;
+      if (result.kind === 'executed' && options.direct) return;
     }
     throw new TreeOnlyOperationError(
       `Tree-only step limit reached (${options.maxSteps})`,

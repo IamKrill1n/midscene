@@ -1,3 +1,4 @@
+import { toTreeOnlyErrorCategory } from './outcomes';
 import {
   TREE_ONLY_MAX_RECOVERIES,
   TreeOnlyOperationError,
@@ -162,13 +163,6 @@ export function throwIfTreeOnlyDeadlineExceeded(
       { operationId: state.context.operationId },
     );
   }
-}
-
-function toTreeOnlyErrorCategory(error: unknown): TreeOnlyErrorCategory {
-  if (error instanceof TreeOnlyOperationError) {
-    return error.category;
-  }
-  return 'service-failure';
 }
 
 /**
