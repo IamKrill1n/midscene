@@ -1,5 +1,10 @@
 import { readFile } from 'node:fs/promises';
-import type { TreeOnlyRunOptions } from '@midscene/core/tree-only';
+import { getModelRuntime } from '@midscene/core/ai-model';
+import type {
+  TreeOnlyPlannerDecision,
+  TreeOnlyPlannerInput,
+  TreeOnlyRunOptions,
+} from '@midscene/core/tree-only';
 import { afterAll, beforeAll, describe, expect, it, rs } from '@rstest/core';
 import { type Browser, chromium } from 'playwright';
 import { PlaywrightAgent } from '../../src/playwright/page-agent';
@@ -50,8 +55,60 @@ function mockJev(
   return evaluate;
 }
 
+/**
+ * Runs the real tree-only runtime with a fake text planner and a fake Jev
+ * that answers only target questions. Resolves a planning model runtime
+ * offline so no credentials or network calls are needed.
+ */
+function mockPlannedAiAct(
+  agent: PlaywrightAgent,
+  planNext: (input: TreeOnlyPlannerInput) => TreeOnlyPlannerDecision,
+  targetNames: Record<string, string> = {
+    target_TYPE_TEXT: 'Name',
+    target_CLICK: 'Save',
+  },
+) {
+  const run = agent.taskExecutor.runTreeOnly.bind(agent.taskExecutor);
+  rs.spyOn(agent as any, 'resolveModelRuntime').mockReturnValue(
+    getModelRuntime({
+      modelName: 'planner',
+      modelDescription: 'test',
+      slot: 'planning',
+      intent: 'planning',
+    }),
+  );
+  const plannerInputs: TreeOnlyPlannerInput[] = [];
+  const plan = rs.fn(async (input: TreeOnlyPlannerInput) => {
+    plannerInputs.push(input);
+    return planNext(input);
+  });
+  const jevRequests: Parameters<TreeOnlyRunOptions['evaluate']>[0][] = [];
+  const evaluate = rs.fn(
+    async (request: Parameters<TreeOnlyRunOptions['evaluate']>[0]) => {
+      jevRequests.push(request);
+      const state = JSON.parse(request.state);
+      const targetName = targetNames[request.questions[0]?.id ?? ''];
+      const node = state.elements.find(
+        (element: { name?: string }) => element.name === targetName,
+      );
+      return {
+        model: 'mock-jev',
+        answers: request.questions.map((question) => ({
+          questionId: question.id,
+          kind: 'choice' as const,
+          optionId: node?.ref ?? 'no-match',
+        })),
+      };
+    },
+  );
+  rs.spyOn(agent.taskExecutor, 'runTreeOnly').mockImplementation((options) =>
+    run({ ...options, plan, evaluate }),
+  );
+  return { plan, evaluate, plannerInputs, jevRequests };
+}
+
 describe('tree-only browser integration (no paid APIs)', () => {
-  it('runs public aiAct through native Input/Tap tasks without screenshots and verifies the DOM outcome', async () => {
+  it('plans aiAct through tree/text evidence and Jev target selection without screenshots', async () => {
     const page = await browser.newPage();
     try {
       await page.setContent(html);
@@ -63,23 +120,97 @@ describe('tree-only browser integration (no paid APIs)', () => {
       const screenshot = rs
         .spyOn(agent.interface, 'screenshotBase64')
         .mockRejectedValue(new Error('Screenshot must not be called'));
-      let turn = 0;
-      const evaluate = mockJev(agent, () =>
-        ++turn === 1
-          ? { operation: 'TYPE_TEXT', name: 'Name' }
-          : turn === 2
-            ? { operation: 'CLICK', name: 'Save' }
-            : { operation: 'DONE' },
+      const visualLocate = rs
+        .spyOn(agent.service, 'locate')
+        .mockRejectedValue(new Error('Visual locate must not be called'));
+      const plans: TreeOnlyPlannerDecision[] = [
+        {
+          operation: 'TYPE_TEXT',
+          instruction: 'the Name field',
+          value: 'Alice',
+        },
+        { operation: 'CLICK', instruction: 'the Save button' },
+        { operation: 'DONE' },
+      ];
+      const { evaluate, plannerInputs, jevRequests } = mockPlannedAiAct(
+        agent,
+        () => plans.shift()!,
       );
+
       await agent.aiAct('Enter Alice as Name and save');
       expect(await page.locator('output').textContent()).toBe('Saved Alice');
-      expect(evaluate).toHaveBeenCalledTimes(3);
-      expect(screenshot).not.toHaveBeenCalled();
+
+      // The planner chose each interaction; Jev only answered target questions.
+      expect(plannerInputs.map((input) => input.instruction)).toEqual([
+        'Enter Alice as Name and save',
+        'Enter Alice as Name and save',
+        'Enter Alice as Name and save',
+      ]);
+      expect(plannerInputs[0].state.page.url).toContain('about:blank');
       expect(
-        agent.dump.executions
-          .flatMap((e) => e.tasks)
-          .some((task) => task.subType === 'Input'),
+        plannerInputs[0].state.elements.some(
+          (element) => element.name === 'Name',
+        ),
       ).toBe(true);
+      expect(
+        plannerInputs[2].state.recent_actions.map((it) => it.operation),
+      ).toEqual(['TYPE_TEXT', 'CLICK']);
+      expect(evaluate).toHaveBeenCalledTimes(2);
+      expect(
+        jevRequests.map((request) => request.questions.map((it) => it.id)),
+      ).toEqual([['target_TYPE_TEXT'], ['target_CLICK']]);
+      for (const request of jevRequests) {
+        expect(request.questions.some((it) => it.id === 'operation')).toBe(
+          false,
+        );
+        expect(request.state).not.toMatch(
+          /screenshot|base64|data:image|locatedPixelResult/,
+        );
+      }
+      expect(screenshot).not.toHaveBeenCalled();
+      expect(visualLocate).not.toHaveBeenCalled();
+      const subTypes = agent.dump.executions
+        .flatMap((execution) => execution.tasks)
+        .map((task) => task.subType);
+      expect(subTypes).toContain('Input');
+      expect(subTypes).toContain('Tap');
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('keeps long ordered planned sequences in order across replans', async () => {
+    const page = await browser.newPage();
+    try {
+      await page.setContent(html);
+      const agent = new PlaywrightAgent(page, {
+        inputMode: 'tree-only',
+        generateReport: false,
+        waitAfterAction: 0,
+      });
+      const plans: TreeOnlyPlannerDecision[] = [
+        {
+          operation: 'TYPE_TEXT',
+          instruction: 'the Name field',
+          value: 'Alice',
+        },
+        { operation: 'CLICK', instruction: 'the Save button' },
+        { operation: 'TYPE_TEXT', instruction: 'the Name field', value: 'Bob' },
+        { operation: 'CLICK', instruction: 'the Save button' },
+        { operation: 'DONE' },
+      ];
+      const { plannerInputs } = mockPlannedAiAct(agent, () => plans.shift()!);
+      await agent.aiAct('Enter Alice and save, then enter Bob and save');
+      expect(await page.locator('output').textContent()).toBe('Saved Bob');
+      const history = plannerInputs[4].state.recent_actions.map(
+        (entry) => `${entry.operation}:${entry.value ?? entry.target ?? ''}`,
+      );
+      expect(history).toEqual([
+        'TYPE_TEXT:Alice',
+        'CLICK:Save',
+        'TYPE_TEXT:Bob',
+        'CLICK:Save',
+      ]);
     } finally {
       await page.close();
     }
