@@ -8,3 +8,7 @@ bin/scrcpy-server
 bin/scrcpy-server.version
 bin/yadb
 bin/.yadb-version
+
+# Python caches for the AndroidWorld benchmark bridge
+__pycache__/
+*.pyc

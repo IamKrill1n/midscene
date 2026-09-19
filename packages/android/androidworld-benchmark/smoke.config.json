@@ -1,0 +1,12 @@
+{
+  "suite": "android_world",
+  "rounds": 1,
+  "tasks": [
+    "ContactsAddContact",
+    "AudioRecorderRecordAudio",
+    "ClockStopWatchRunning"
+  ],
+  "taskTimeoutMs": 600000,
+  "cycleLimit": 120,
+  "outputDir": "midscene_run/androidworld-smoke"
+}
