@@ -324,6 +324,10 @@ export default defineConfig(async () => {
             link: '/android-world-benchmark-report',
           },
           {
+            text: 'AndroidWorld Benchmark Guide',
+            link: '/android-world-benchmark-guide',
+          },
+          {
             text: 'MobileWorld Benchmark',
             link: '/mobile-world-benchmark-report',
           },
@@ -498,6 +502,10 @@ export default defineConfig(async () => {
           {
             text: 'AndroidWorld Benchmark',
             link: '/zh/android-world-benchmark-report',
+          },
+          {
+            text: 'AndroidWorld Benchmark 指南',
+            link: '/zh/android-world-benchmark-guide',
           },
           {
             text: 'MobileWorld Benchmark',

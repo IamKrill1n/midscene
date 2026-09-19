@@ -1,0 +1,196 @@
+# AndroidWorld Benchmark Guide
+
+This guide reproduces Midscene's [AndroidWorld benchmark report](./android-world-benchmark-report)
+on a local emulator: 116 programmatic tasks across 20 Android apps, with task
+setup and scoring handled by AndroidWorld itself and UI driving handled by
+Midscene's `AndroidAgent`. The official run used `Gemini-3.5-Flash`; this
+guide defaults to the DeepSeek V4 series and keeps the Gemini configuration
+as a reference column, since model choice is the main variable you will change.
+
+:::info About AndroidWorld
+
+[AndroidWorld](https://github.com/google-research/android_world) is an
+Android Agent benchmark from Google Research. It runs on a live Android
+emulator and evaluates agents on 116 programmatic tasks across 20 real-world
+Android apps, with task initialization and validation handled by the
+benchmark. The [paper](https://arxiv.org/pdf/2405.14573) describes the task
+design.
+
+:::
+
+## Run configuration
+
+| Field | Official report value | This guide's default |
+| --- | --- | --- |
+| Model | `gemini-3.5-flash` (`gemini` family) | `deepseek-flash` (`deepseek` family) |
+| Midscene version | `1.9.5` | Current workspace version |
+| DeepThink | on | on (`aiAct` option `deepThink: true`) |
+| Replanning limit | `MIDSCENE_REPLANNING_CYCLE_LIMIT=120` | Agent option `replanningCycleLimit: 120` |
+| Device | Emulator (Pixel 6, API 33) | Emulator (Pixel 6, API 33) |
+| Suite | `android_world`, 116 tasks | `android_world`, 116 tasks |
+| Scoring | Pass@1 / Pass@2 / Pass@3 | Same (validator score above `0.5` passes) |
+
+DeepThink is the `aiAct` planning mode that spends extra model calls on task
+decomposition and element locating; it makes multi-step tasks more stable at
+the cost of latency. The replanning limit caps how many times `aiAct` may
+re-plan before giving up. Prefer the `replanningCycleLimit` Agent option; the
+environment variable remains as a fallback.
+
+## Prerequisites
+
+- Node.js and pnpm per the repository root `package.json` (`engines`), then
+  `pnpm install` (this also builds workspace packages).
+- Android SDK with `ANDROID_HOME` set, `adb` on `PATH`, and `ffmpeg`
+  installed.
+- Python 3.11 or newer for AndroidWorld.
+- A model API key (DeepSeek by default). See
+  [Supported models and setup](./model-common-config) and
+  [Model configuration](./model-config).
+
+## Step 1: start the emulator
+
+1. In Android Studio, create an Android Virtual Device (AVD): device **Pixel 6**,
+   system image **Tiramisu, API Level 33**, AVD name `AndroidWorldAvd`.
+2. Launch it from the command line (not the Studio UI) with the gRPC flag that
+   AndroidWorld needs:
+
+```bash
+EMULATOR_NAME=AndroidWorldAvd # From previous step
+~/Library/Android/sdk/emulator/emulator -avd $EMULATOR_NAME -no-snapshot -grpc 8554
+```
+
+3. Verify the device is visible:
+
+```bash
+adb devices -l
+```
+
+## Step 2: install AndroidWorld and apply the patch map
+
+```bash
+git clone https://github.com/google-research/android_world.git
+cd ./android_world
+pip install -r requirements.txt
+python setup.py install
+```
+
+Pin the checkout (`git rev-parse HEAD`) and apply the stability fixes plus
+validator updates documented in
+`packages/android/androidworld-benchmark/stability-patches.md`. Those two
+tables mirror the official report: browser rendering retries, SMS setup
+verification, Expense database waits, OsmAnd map preloading, plus Calendar /
+Expense / Markor / Recipe / brightness validator corrections. Record the
+AndroidWorld commit hash and the applied hunks next to your run evidence;
+unrecorded validator edits change what the numbers mean.
+
+On the first run only, perform the one-time emulator app setup:
+
+```bash
+python run.py --suite_family=android_world --perform_emulator_setup --tasks=ContactsAddContact
+```
+
+## Step 3: configure the model
+
+DeepSeek (default for this guide; supported since Midscene v1.12.0):
+
+```bash
+export MIDSCENE_MODEL_BASE_URL="https://api.deepseek.com"
+export MIDSCENE_MODEL_API_KEY="your-api-key"
+export MIDSCENE_MODEL_NAME="deepseek-flash"
+export MIDSCENE_MODEL_FAMILY="deepseek"
+```
+
+Gemini reference (official report configuration):
+
+```bash
+export MIDSCENE_MODEL_BASE_URL="https://generativelanguage.googleapis.com/v1beta/openai/"
+export MIDSCENE_MODEL_API_KEY="your-api-key"
+export MIDSCENE_MODEL_NAME="gemini-3.5-flash"
+export MIDSCENE_MODEL_FAMILY="gemini"
+```
+
+Replace `your-api-key` with your API Key. Only `DeepSeek-V4` vision-capable
+models work with Midscene; `DeepSeek-V4-Pro` has no visual input and cannot
+be used. For Planning / Insight model splits, see
+[Model configuration](./model-config).
+
+## Step 4: verify the Midscene Android connection
+
+```bash
+npx --yes @midscene/android-playground
+```
+
+The Playground shares the core with `@midscene/android`, so anything that
+works there behaves the same once scripted. Device lifecycle rule: each
+Device instance belongs to exactly one Agent — create a fresh `AndroidDevice`
+per `AndroidAgent` and never reuse a Device after its Agent is destroyed.
+The harness already follows this rule (`agentFromAdbDevice` per task,
+`agent.destroy()` in `finally`).
+
+## Step 5: run the harness
+
+The harness lives in `packages/android/androidworld-benchmark/`:
+
+- `run.ts` — Node runner (task loop, resume, Pass@k summary).
+- `androidworld_bridge.py` — stdio bridge that reuses AndroidWorld's task
+  registry (`initialize_task`, `is_successful`, `tear_down`) and forwards QA
+  answers through `env.interaction_cache`, the same channel the built-in
+  agents use for the ANSWER action.
+- `smoke.config.json` — three-task smoke selection.
+
+```bash
+cd packages/android/androidworld-benchmark
+npx tsx run.ts --config=smoke.config.json
+npx tsx run.ts --tasks=ContactsAddContact,ClockStopWatchRunning --rounds=1
+npx tsx run.ts --rounds=3 --resume
+```
+
+Options: `--tasks=A,B`, `--rounds=1-3`, `--suite=android_world`,
+`--output=dir`, `--resume`, `--task-timeout-ms=N`, `--cycle-limit=N`,
+`--config=path`. Per-task flow: bridge `init_task` returns the goal, the
+runner calls `aiAct(goal, { deepThink: true })` with
+`replanningCycleLimit: 120`. For information-retrieval tasks it then reads the
+answer with `aiAsk(goal)` and forwards it through `submit_answer`; finally
+`score_task` / `teardown_task` record the validator verdict. If AndroidWorld
+is installed into a virtualenv, point the runner at it with
+`MIDSCENE_ANDROIDWORLD_PYTHON=/path/to/venv/bin/python`.
+
+## Step 6: read the results
+
+- Round 1 runs every selected task; rounds 2-3 retry only tasks without a
+  passing attempt — the same round scheme as the official report.
+- A validator score above `0.5` counts as a pass.
+- Pass@k counts a task when any attempt in rounds 1..k passed.
+- The runner appends `results.jsonl` (crash-safe resume), writes
+  `summary.json` (options, Pass@k, per-round counts), and Midscene writes its
+  native HTML reports under `midscene_run/report/`.
+
+:::info Scores across models are not interchangeable
+
+The official 93.10% Pass@1 was measured with `Gemini-3.5-Flash`. A DeepSeek
+run on the same harness is comparable in procedure but not in number: report
+the model name, Midscene version, AndroidWorld commit, and patch list with
+every score.
+
+:::
+
+## Troubleshooting
+
+- `INJECT_EVENTS permission` errors: enable USB debugging on the device and
+  keep it unlocked; on emulator images this is already the case.
+- Text input cleared or rewritten: see the keyboard sections of the
+  [Android guide](./platforms/android) (`keyboardDismissStrategy`,
+  `imeStrategy`).
+- Black screenshots on secure pages: see `screenshotStrategy` in the same
+  guide.
+- Scrcpy falling back to ADB screenshots: freshness-gated fallback, not a
+  bandwidth diagnosis — do not change the bitrate for this warning alone.
+
+## More
+
+- [AndroidWorld benchmark report](./android-world-benchmark-report) — official
+  numbers and per-task report files.
+- [Android guide](./platforms/android) — device setup, Playground, SDK, FAQ.
+- [Supported models and setup](./model-common-config) — exact model strings.
+- [Model debugging and observability](./model-debugging-observability) —
+  logs, tracing, and call recording when a run misbehaves.
