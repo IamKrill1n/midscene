@@ -617,15 +617,24 @@ export const generateAnimationScripts = (
         imageWidth,
         imageHeight,
       );
+      const center = task.param?.locate?.center;
+      const baseCamera = createFullPageCameraState(width, height);
+      const camera =
+        task.subType === 'Sleep'
+          ? baseCamera
+          : Array.isArray(center) && center.length === 2
+            ? {
+                ...baseCamera,
+                pointerLeft: Math.round(center[0]),
+                pointerTop: Math.round(center[1]),
+              }
+            : undefined;
       scripts.push(
         createScript(
           {
             type: 'img',
             duration: actionDuration,
-            camera:
-              task.subType === 'Sleep'
-                ? createFullPageCameraState(width, height)
-                : undefined,
+            camera,
             title,
             subTitle,
             imageWidth: width,

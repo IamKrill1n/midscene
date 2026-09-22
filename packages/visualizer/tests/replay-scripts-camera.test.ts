@@ -18,18 +18,23 @@ import {
 
 function createActionTask({
   height,
+  param,
   screenshot,
+  subType = 'Sleep',
   taskId,
   width,
 }: {
   height: number;
+  param?: ExecutionTaskAction['param'];
   screenshot: string;
+  subType?: string;
   taskId: string;
   width: number;
 }): ExecutionTaskAction {
   return {
     type: 'Action Space',
-    subType: 'Sleep',
+    subType,
+    param,
     taskId,
     status: 'finished',
     executor: () => undefined,
@@ -129,6 +134,55 @@ describe('generateAnimationScripts', () => {
       width: 300,
       height: 200,
     });
+  });
+
+  it('places the pointer from Action Space locate.center', () => {
+    const execution = {
+      name: 'pointer-locate-regression',
+      tasks: [
+        createActionTask({
+          taskId: 'tap-locate',
+          screenshot: 'frame-tap-locate',
+          width: 720,
+          height: 1280,
+          subType: 'TAP',
+          param: { locate: { center: [80, 120] } },
+        }),
+      ],
+    } as IExecutionDump;
+
+    const scripts = generateAnimationScripts(execution, -1, 720, 1280);
+    const imageScript = scripts?.find(
+      (script) => script.type === 'img' && script.taskId,
+    );
+
+    expect(imageScript?.taskId).toBe('tap-locate');
+    expect(imageScript?.camera?.pointerLeft).toBe(80);
+    expect(imageScript?.camera?.pointerTop).toBe(120);
+    expect(imageScript?.camera?.width).toBe(720);
+  });
+
+  it('keeps the camera unset for Action Space tasks without locate', () => {
+    const execution = {
+      name: 'pointer-missing-locate',
+      tasks: [
+        createActionTask({
+          taskId: 'tap-no-locate',
+          screenshot: 'frame-tap-no-locate',
+          width: 720,
+          height: 1280,
+          subType: 'TAP',
+        }),
+      ],
+    } as IExecutionDump;
+
+    const scripts = generateAnimationScripts(execution, -1, 720, 1280);
+    const imageScript = scripts?.find(
+      (script) => script.type === 'img' && script.taskId,
+    );
+
+    expect(imageScript?.taskId).toBe('tap-no-locate');
+    expect(imageScript?.camera).toBeUndefined();
   });
 });
 
