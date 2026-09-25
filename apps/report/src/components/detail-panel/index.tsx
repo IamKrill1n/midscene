@@ -11,7 +11,6 @@ import {
 } from '@ant-design/icons';
 import type {
   ExecutionDump,
-  ExecutionTaskPlanning,
   ExecutionTaskPlanningLocate,
   IExecutionDump,
 } from '@midscene/core';
@@ -29,7 +28,6 @@ import {
   downloadMarkdownZip,
   markdownZipDownloadTooltip,
 } from '../../utils/markdown-export';
-import OpenInPlayground from '../open-in-playground';
 import { sanitizeJsonViewData } from './json-view-data';
 import { getExecutionMarkdownView } from './markdown-view';
 
@@ -419,9 +417,6 @@ const DetailPanel = ({
               </button>
             </Tooltip>
           )}
-          <OpenInPlayground
-            context={(activeTask as ExecutionTaskPlanning)?.uiContext}
-          />
         </div>
       </div>
       <div className="detail-content">{content}</div>

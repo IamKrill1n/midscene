@@ -12,17 +12,11 @@
       "types": "./dist/types/index.d.ts",
       "import": "./dist/es/index.mjs",
       "require": "./dist/lib/index.js"
-    },
-    "./history-selector": {
-      "types": "./dist/types/component/history-selector/index.d.ts",
-      "import": "./dist/es/component/history-selector/index.mjs",
-      "require": "./dist/lib/component/history-selector/index.js"
     }
   },
   "typesVersions": {
     "*": {
-      ".": ["./dist/types/index.d.ts"],
-      "history-selector": ["./dist/types/component/history-selector/index.d.ts"]
+      ".": ["./dist/types/index.d.ts"]
     }
   },
   "files": ["dist", "html", "README.md"],
@@ -63,9 +57,7 @@
   "dependencies": {
     "@ant-design/icons": "^5.3.1",
     "@midscene/core": "workspace:*",
-    "@midscene/playground": "workspace:*",
     "@midscene/shared": "workspace:*",
-    "@midscene/web": "workspace:*",
     "antd": "^5.21.6",
     "buffer": "6.0.3",
     "dayjs": "^1.11.11"

@@ -14,52 +14,19 @@ export {
   globalThemeConfig,
 } from './utils/color';
 
-export { EnvConfig } from './component/env-config';
-export type { EnvConfigProps } from './component/env-config';
-export { EnvConfigReminder } from './component/env-config-reminder';
-export type { EnvConfigReminderProps } from './component/env-config-reminder';
-export {
-  ConfigModal,
-  agentOptionsToFormValues,
-  parseAgentOptionFormValues,
-} from './component/config-modal';
-export type {
-  CommonAgentOptionFormValues,
-  CommonAgentOptionKey,
-  CommonAgentOptions,
-  ConfigModalEnvField,
-  ConfigModalProps,
-  ConfigModalTab,
-} from './component/config-modal';
-export { NavActions } from './component/nav-actions';
-export type { NavActionsProps } from './component/nav-actions';
-
 export { Logo } from './component/logo';
 export { iconForStatus, timeCostStrElement } from './component/misc';
 export { useTheme } from './hooks/useTheme';
-export { useServerValid } from './hooks/useServerValid';
 export { useTextTruncation } from './hooks/useTextTruncation';
 export {
   useSafeOverrideAIConfig,
   safeOverrideAIConfig,
 } from './hooks/useSafeOverrideAIConfig';
 
-export { PlaygroundResultView } from './component/playground-result';
-export type { PlaygroundResult } from './types';
-export { ServiceModeControl } from './component/service-mode-control';
-export { ContextPreview } from './component/context-preview';
-export { PromptInput } from './component/prompt-input';
 export { Player } from './component/player';
 export { Blackboard } from './component/blackboard';
 export { default as ScreenshotViewer } from './component/screenshot-viewer';
 export type { ScreenshotViewerMode } from './component/screenshot-viewer';
-
-// Export playground utilities
-export {
-  actionNameForType,
-  staticAgentFromContext,
-  getPlaceholderForType,
-} from './utils/playground-utils';
 
 export {
   timeStr,
@@ -70,46 +37,3 @@ export {
 export type { NotifyErrorOptions } from './utils';
 
 export { default as ShinyText } from './component/shiny-text';
-
-// Export Universal Playground
-export {
-  UniversalPlayground,
-  default as UniversalPlaygroundDefault,
-} from './component/universal-playground';
-export type {
-  UniversalPlaygroundProps,
-  PlaygroundSDKLike,
-  StorageProvider,
-  ContextProvider,
-  UniversalPlaygroundConfig,
-  PlaygroundBranding,
-  InfoListItem,
-  ExternalRunRequest,
-  FormValue,
-  ExecutionOptions,
-  ProgressCallback,
-  DeviceType,
-  ExecutionUxHint,
-  ExecutionUxConfig,
-  PromptInputChromeConfig,
-  PlaygroundExecutionStatus,
-  ReportDownloadHandler,
-  ReportDownloadRequest,
-} from './types';
-
-// Export storage providers (both legacy and new)
-export {
-  LocalStorageProvider,
-  MemoryStorageProvider,
-  NoOpStorageProvider,
-  IndexedDBStorageProvider,
-  createStorageProvider,
-  detectBestStorageType,
-  StorageType,
-} from './component/universal-playground/providers/storage-provider';
-export {
-  BaseContextProvider,
-  AgentContextProvider,
-  StaticContextProvider,
-  NoOpContextProvider,
-} from './component/universal-playground/providers/context-provider';

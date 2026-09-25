@@ -2,10 +2,7 @@ import path from 'node:path';
 import { defineConfig, devices } from '@playwright/test';
 import dotenv from 'dotenv';
 
-const MIDSCENE_REPORT = process.env.MIDSCENE_REPORT;
-
 process.env.__VERSION__ = '1.0.0';
-
 /**
  * Read environment variables from file.
  * https://github.com/motdotla/dotenv
@@ -42,28 +39,11 @@ export default defineConfig({
 
   /* Configure projects for major browsers */
   projects: [
-    MIDSCENE_REPORT
-      ? {
-          name: 'report',
-          testDir: './ai/web/playwright-reporter-test',
-          use: { ...devices['Desktop Chrome'] },
-        }
-      : {
-          name: 'e2e',
-          testDir: './ai/web/playwright',
-          use: { ...devices['Desktop Chrome'] },
-        },
+    {
+      name: 'e2e',
+      testDir: './ai/web/playwright',
+      use: { ...devices['Desktop Chrome'] },
+    },
   ],
-  reporter: [
-    [process.env.CI ? 'line' : 'list'],
-    // [
-    //   'json',
-    //   { outputFile: 'midscene_run/playwright-reporter/test-results.json' },
-    // ],
-    // ['html', { outputFolder: 'midscene_run/playwright-reporter' }],
-    [
-      '../src/playwright/reporter/index.ts',
-      { type: 'merged', outputFormat: 'single-html' },
-    ], // separate/merged
-  ],
+  reporter: [[process.env.CI ? 'line' : 'list']],
 });

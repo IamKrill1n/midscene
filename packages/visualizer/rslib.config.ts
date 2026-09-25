@@ -44,7 +44,6 @@ export default defineConfig({
   },
   output: {
     target: 'web',
-    copy: [{ from: './**/*.json', context: './src' }],
     externals: [/.*\.json$/],
   },
   plugins: [

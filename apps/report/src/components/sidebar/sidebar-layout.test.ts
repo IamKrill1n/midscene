@@ -31,10 +31,6 @@ const detailPanelSource = readFileSync(
   new URL('../detail-panel/index.tsx', import.meta.url),
   'utf8',
 );
-const playgroundSource = readFileSync(
-  new URL('../open-in-playground/index.tsx', import.meta.url),
-  'utf8',
-);
 
 const mobileReportMediaQuery =
   '@media (max-width: 640px), (max-width: 932px) and (max-height: 500px) and (pointer: coarse)';
@@ -145,16 +141,11 @@ describe('sidebar layout', () => {
       /\.mobile-report-tabs\s*{[\s\S]*?padding: 2px;[\s\S]*?button\s*{[\s\S]*?height: 44px;/,
     );
     expect(detailPanelStyles).toContain(mobileReportMediaQuery);
-    expect(detailPanelStyles).toMatch(
-      /\.copy-json-label,\s*\.open-in-playground-trigger\s*{\s*display: none;/,
-    );
+    expect(detailPanelStyles).toMatch(/\.copy-json-label\s*{\s*display: none;/);
     expect(detailPanelStyles).toMatch(
       /\.copy-json-link\s*{[\s\S]*?width: 48px;[\s\S]*?height: 48px;/,
     );
     expect(detailPanelSource).toContain('aria-label="Copy JSON"');
     expect(detailPanelSource).toContain('className="copy-json-label"');
-    expect(playgroundSource.match(/open-in-playground-trigger/g)).toHaveLength(
-      2,
-    );
   });
 });

@@ -226,7 +226,8 @@
   }
 }
 
-@media (max-width: 640px), (max-width: 932px) and (max-height: 500px) and (pointer: coarse) {
+@media (max-width: 640px),
+  (max-width: 932px) and (max-height: 500px) and (pointer: coarse) {
   .detail-panel {
     .view-switcher-actions {
       gap: 8px;
@@ -245,8 +246,7 @@
       }
     }
 
-    .copy-json-label,
-    .open-in-playground-trigger {
+    .copy-json-label {
       display: none;
     }
   }
@@ -329,7 +329,8 @@
     }
   }
 
-  @media (max-width: 640px), (max-width: 932px) and (max-height: 500px) and (pointer: coarse) {
+  @media (max-width: 640px),
+    (max-width: 932px) and (max-height: 500px) and (pointer: coarse) {
     .detail-panel .copy-json-link:active {
       background: rgba(255, 255, 255, 0.08);
     }
