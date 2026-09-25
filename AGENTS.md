@@ -1,6 +1,6 @@
 # Midscene AGENTS
 
-Midscene is an SDK for AI automation (browser/device agents + YAML test framework).
+This fork is pruned to the Playwright integration (`@midscene/web/playwright` plus HTML report generation); Android, iOS, HarmonyOS, computer-use, CLI, YAML runner, playground UI, and the Chrome extension are intentionally absent.
 
 - Use `pnpm` only. Requires Node `^20.19.0 || ^22.12.0 || >=24.0.0`, pnpm `>=9.3.0`.
 - Read `CONTRIBUTING.md` before local dev (dev servers, build wiring there).
